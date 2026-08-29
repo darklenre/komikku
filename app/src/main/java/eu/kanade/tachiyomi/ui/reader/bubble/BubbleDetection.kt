@@ -6,13 +6,10 @@ import android.graphics.Bitmap
 import android.os.Process
 import android.util.LruCache
 import androidx.core.content.getSystemService
-import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -66,34 +63,12 @@ object BubbleDetection {
         }
     }
 
-    fun onEngineChanged() {
-        synchronized(this) {
-            when (val d = detector) {
-                is OnnxBubbleDetector -> d.close()
-                is TfliteBubbleDetector -> d.close()
-            }
-            detector = null
-            cache.evictAll()
-        }
-    }
-
     private fun detectorFor(appContext: Context): BubbleDetector {
         detector?.let { return it }
         return synchronized(this) {
-            detector ?: run {
-                if (!isSupported(appContext)) {
-                    NoopBubbleDetector
-                } else {
-                    val prefs = Injekt.get<ReaderPreferences>()
-                    val engine = prefs.bubbleZoomEngine().get()
-                    if (engine == "tflite") {
-                        val tflite = TfliteBubbleDetector(appContext)
-                        if (tflite.isAvailable) tflite else OnnxBubbleDetector(appContext)
-                    } else {
-                        OnnxBubbleDetector(appContext)
-                    }
-                }
-            }.also { detector = it }
+            detector ?: (
+                if (isSupported(appContext)) TfliteBubbleDetector(appContext) else NoopBubbleDetector
+                ).also { detector = it }
         }
     }
 }

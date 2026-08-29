@@ -157,15 +157,7 @@
 -keep class * extends coil3.util.DecoderServiceLoaderTarget { *; }
 -keep class * extends coil3.util.FetcherServiceLoaderTarget { *; }
 
-# ONNX Runtime (Bubble Zoom): the native library instantiates these Java classes
-# and calls their methods/fields via JNI reflection, which R8 can't see. Without
-# this, minified builds abort with "JNI DETECTED ERROR ... mid == null" in
-# OrtSession.run (convertToTensorInfo).
--keep class ai.onnxruntime.** { *; }
--keepclassmembers class ai.onnxruntime.** { *; }
--dontwarn ai.onnxruntime.**
-
-# LiteRT / TensorFlow Lite (Bubble Zoom, secondo motore): JNI reflection dal nativo
+# LiteRT / TensorFlow Lite (Bubble Zoom): JNI reflection dal nativo
 -keep class org.tensorflow.lite.** { *; }
 -keepclassmembers class org.tensorflow.lite.** { *; }
 -dontwarn org.tensorflow.lite.**

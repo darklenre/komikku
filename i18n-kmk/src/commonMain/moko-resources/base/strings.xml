@@ -31,12 +31,6 @@
     <string name="pref_category_bubble_zoom">Bubble Zoom</string>
     <string name="pref_bubble_zoom_long_tap">Bubble zoom with long tap</string>
     <string name="pref_bubble_zoom_long_tap_summary">Long-tap a speech bubble to zoom into it. Long-tap elsewhere still opens the page actions.</string>
-    <string name="pref_bubble_zoom_engine">Detection engine</string>
-    <string name="pref_bubble_zoom_engine_summary">%s</string>
-    <string name="bubble_zoom_engine_onnx">ONNX Runtime</string>
-    <string name="bubble_zoom_engine_tflite">TensorFlow Lite</string>
-    <string name="bubble_zoom_engine_onnx_desc">Reference build. Slightly larger, no hardware acceleration.</string>
-    <string name="bubble_zoom_engine_tflite_desc">Lighter, can use NNAPI / GPU acceleration.</string>
     <string name="bubble_zoom_hint">Tap to exit · swipe to move between bubbles</string>
     <string name="error_opening_folder">Failed to open folder</string>
     <string name="pref_pinch_to_zoom">Pinch to zoom</string>

@@ -42,6 +42,8 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     private var numAnchors = 8400
     private var isOutputTransposed = false
     private var outputArray3D: Array<Array<FloatArray>>? = null
+    private var protoArray4D: Array<Array<Array<FloatArray>>>? = null
+    private val outputMap = HashMap<Int, Any>()
 
     init {
         inputByteBuffer = ByteBuffer.allocateDirect(1 * 3 * INPUT * INPUT * 4).apply {
@@ -83,7 +85,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
             interpreter?.let { interp ->
                 val outShape = interp.getOutputTensor(0).shape()
                 if (outShape.size == 3) {
-                    if (outShape[1] == 8400 && outShape[2] <= 32) {
+                    if (outShape[1] == 8400 && outShape[2] <= 40) {
                         isOutputTransposed = true
                         numAnchors = outShape[1]
                         numFeatures = outShape[2]
@@ -93,6 +95,19 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
                         numFeatures = outShape[1]
                         numAnchors = outShape[2]
                         outputArray3D = Array(1) { Array(numFeatures) { FloatArray(numAnchors) } }
+                    }
+                }
+                outputArray3D?.let { outputMap[0] = it }
+
+                if (interp.outputTensorCount > 1) {
+                    val protoShape = interp.getOutputTensor(1).shape()
+                    if (protoShape.size == 4) {
+                        val masks = protoShape[1]
+                        val protoH = protoShape[2]
+                        val protoW = protoShape[3]
+                        val protoArr = Array(1) { Array(masks) { Array(protoH) { FloatArray(protoW) } } }
+                        protoArray4D = protoArr
+                        outputMap[1] = protoArr
                     }
                 }
             }
@@ -157,7 +172,11 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         inputBuffer.rewind()
 
         val out3D = outputArray3D ?: return emptyList()
-        interp.run(inputByteBuffer, out3D)
+        if (outputMap.size > 1) {
+            interp.runForMultipleInputsOutputs(arrayOf(inputByteBuffer), outputMap)
+        } else {
+            interp.run(inputByteBuffer, out3D)
+        }
 
         val featureMajor: Array<FloatArray> = if (isOutputTransposed) {
             val out = out3D[0] // [8400][features]
@@ -188,6 +207,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
             coordsIn640Space = coordsIn640Space,
             confThreshold = CONF_THRESHOLD,
             iouThreshold = IOU_THRESHOLD,
+            protoMasks = protoArray4D?.get(0),
         )
     }
 

@@ -147,10 +147,10 @@ android {
         includeInBundle = Config.includeDependencyInfo
     }
 
-    // KMK: keep the ONNX and TFLite bubble-detection models uncompressed so they can be mmap'd from assets
+    // KMK: keep the TFLite bubble-detection model uncompressed so it can be mmap'd from assets
     androidResources {
         @Suppress("UnstableApiUsage")
-        noCompress += listOf("onnx", "tflite")
+        noCompress += "tflite"
     }
 
     buildFeatures {
@@ -310,7 +310,6 @@ dependencies {
 
     // KMK -->
     implementation(libs.palette.ktx)
-    implementation(libs.onnxruntime.android) // Bubble Zoom: on-device speech-bubble detection (ONNX)
     implementation(libs.tensorflow.lite) // Bubble Zoom: on-device speech-bubble detection (TFLite)
     implementation(libs.tensorflow.lite.gpu)
     implementation(libs.tensorflow.lite.gpu.api)
