@@ -563,7 +563,6 @@ object SettingsReaderScreen : SearchableSettings {
         val context = LocalContext.current
         val bubbleZoomSupported = remember { BubbleDetection.isSupported(context) }
         val bubbleZoomPref = readerPreferences.bubbleZoom()
-        val bubbleZoom by bubbleZoomPref.collectAsState()
 
         return Preference.PreferenceGroup(
             title = stringResource(KMR.strings.pref_category_bubble_zoom),
@@ -573,20 +572,6 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(KMR.strings.pref_bubble_zoom_long_tap),
                     subtitle = stringResource(KMR.strings.pref_bubble_zoom_long_tap_summary),
                     enabled = bubbleZoomSupported,
-                ),
-                Preference.PreferenceItem.ListPreference(
-                    preference = readerPreferences.bubbleZoomEngine(),
-                    entries = persistentMapOf(
-                        "onnx" to stringResource(KMR.strings.bubble_zoom_engine_onnx),
-                        "tflite" to stringResource(KMR.strings.bubble_zoom_engine_tflite),
-                    ),
-                    title = stringResource(KMR.strings.pref_bubble_zoom_engine),
-                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_engine_summary),
-                    enabled = bubbleZoomSupported && bubbleZoom,
-                    onValueChanged = {
-                        BubbleDetection.onEngineChanged()
-                        true
-                    },
                 ),
             ),
         )

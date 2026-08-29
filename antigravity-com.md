@@ -47,13 +47,11 @@
 
 ## 3. Riepilogo File e Stato dei Task
 
-Tutti gli item di sviluppo (Flusso A e Flusso B) sono completati con successo:
-
 | Componente | Stato | Dettagli |
 |---|---|---|
-| ONNX Runtime Engine | ✅ | Funzionante e ottimizzato |
-| TensorFlow Lite Engine | ✅ | Modello int8 bundlato, GPU delegate + CPU fallback |
-| UI Impostazioni | ✅ | Categoria dedicata + selettore ONNX/TFLite con switch a caldo |
+| ONNX Runtime Engine | ❌ Rimosso | Eliminato su richiesta utente (-44 MB risparmiati tra `.onnx` e `.so`) |
+| TensorFlow Lite Engine | ✅ | Motore unico attivo: int8 quantizzato, GPU delegate + fallback CPU |
+| UI Impostazioni | ✅ | Switch abilitazione Bubble Zoom (selettore motore rimosso) |
 | Navigazione Pager + Webtoon | ✅ | Long-tap, swipe tra bubble, edge page-turn |
 | Indicatori & Licenze | ✅ | Progress bar indeterminate Compose + AboutLibraries |
 
@@ -65,7 +63,7 @@ Build `preview` arm64 con R8/minificazione attiva, testata in wireless debugging
 
 | Motore | Runtime / Hardware | Latenza Mediana | Range | Dettagli |
 |---|---|---|---|---|
-| **ONNX Runtime** | CPU single-thread | **~217 ms** | 213–257 ms | int8 @640, 19 pagine |
+| **ONNX Runtime** *(disdimesso)* | CPU single-thread | **~217 ms** | 213–257 ms | int8 @640, 19 pagine |
 | **TensorFlow Lite** | **GPU Delegate (Adreno)** | **~123 ms** | 120–125 ms (153 warmup) | int8 @640, 14 pagine |
 
 **Risultato**: TensorFlow Lite con GPU delegate è **~1.75× più veloce** (-43% tempo di inferenza per pagina) rispetto a ONNX Runtime su CPU.
@@ -74,8 +72,9 @@ Build `preview` arm64 con R8/minificazione attiva, testata in wireless debugging
 
 ## 5. Nuova Feature Pianificata: Floating Extracted Bubble Zoom (§6 del Piano)
 
-In risposta alla nuova richiesta utente, è stata inserita nel piano operativo la **Sezione 6**:
+In risposta alla richiesta utente, è stata inserita nel piano operativo la **Sezione 6**:
 * **Trigger**: Double-tap sulla nuvoletta (intercetta le coordinate; se fuori nuvoletta esegue il classico double-tap zoom 2×).
-* **Effetto**: Ritaglio sagoma reale (non-rettangolare) della nuvoletta via CV/Thresholding & Alpha mask + visualizzazione centrata ingrandita a schermo intero con backdrop oscurato.
+* **Effetto**: Ritaglio sagoma reale (non-rettangolare) della nuvoletta via CV/Thresholding & Alpha mask o maschera poligonale + visualizzazione centrata ingrandita a schermo intero con backdrop oscurato.
+* **Hit-Testing**: Hit-testing preciso sulla sagoma reale della nuvoletta (ignora i 4 angoli vuoti dei bounding box).
 * **Navigazione**: Swipe per nuvoletta successiva/precedente + tap singolo per uscire.
 * **Opzioni**: `bubble_zoom_style` (`in_place` vs `floating_extracted`) e `bubble_zoom_trigger` (`long_tap` vs `double_tap`).

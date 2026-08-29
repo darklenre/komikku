@@ -22,7 +22,14 @@ internal fun letterboxOf(srcW: Int, srcH: Int, inputSize: Int = 640): Letterbox 
     return Letterbox(gain, padX, padY, nw, nh, inputSize)
 }
 
-internal class Det(val l: Float, val t: Float, val r: Float, val b: Float, val score: Float)
+internal class Det(
+    val l: Float,
+    val t: Float,
+    val r: Float,
+    val b: Float,
+    val score: Float,
+    val maskWeights: FloatArray? = null,
+)
 
 internal fun iou(a: Det, b: Det): Float {
     val ix = max(0f, min(a.r, b.r) - max(a.l, b.l))
@@ -33,10 +40,10 @@ internal fun iou(a: Det, b: Det): Float {
 }
 
 /**
- * Decodes YOLOv8 detections from [featureMajor] matrix ([features][anchors]).
+ * Decodes YOLOv8 detections and optional segmentation masks from [featureMajor] matrix ([features][anchors]).
  *
- * @param coordsIn640Space true if cx,cy,w,h are in pixel coordinates (0..inputSize, typical of ONNX export),
- *                         false if already normalized to 0..1 relative to the letterbox square (typical of TFLite export).
+ * @param coordsIn640Space true if cx,cy,w,h are in pixel coordinates (0..inputSize),
+ *                         false if normalized to 0..1 relative to the letterbox square.
  */
 internal fun decodeDetections(
     featureMajor: Array<FloatArray>,
@@ -44,10 +51,13 @@ internal fun decodeDetections(
     coordsIn640Space: Boolean,
     confThreshold: Float = 0.30f,
     iouThreshold: Float = 0.45f,
+    protoMasks: Array<Array<FloatArray>>? = null,
 ): List<Bubble> {
     val features = featureMajor.size
     val anchors = featureMajor[0].size
-    val classes = features - 4
+    val hasMasks = features > 32
+    val numMasks = if (hasMasks) 32 else 0
+    val classes = (features - 4 - numMasks).coerceAtLeast(1)
 
     val dets = ArrayList<Det>()
     for (a in 0 until anchors) {
@@ -66,7 +76,13 @@ internal fun decodeDetections(
             h *= lb.inputSize
         }
 
-        dets.add(Det(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, best))
+        val maskWeights = if (hasMasks) {
+            FloatArray(32) { m -> featureMajor[4 + classes + m][a] }
+        } else {
+            null
+        }
+
+        dets.add(Det(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, best, maskWeights))
     }
     if (dets.isEmpty()) return emptyList()
 
