@@ -156,6 +156,14 @@
 # Coil3
 -keep class * extends coil3.util.DecoderServiceLoaderTarget { *; }
 -keep class * extends coil3.util.FetcherServiceLoaderTarget { *; }
+
+# ONNX Runtime (Bubble Zoom): the native library instantiates these Java classes
+# and calls their methods/fields via JNI reflection, which R8 can't see. Without
+# this, minified builds abort with "JNI DETECTED ERROR ... mid == null" in
+# OrtSession.run (convertToTensorInfo).
+-keep class ai.onnxruntime.** { *; }
+-keepclassmembers class ai.onnxruntime.** { *; }
+-dontwarn ai.onnxruntime.**
 # KMK <--
 
 # Design library

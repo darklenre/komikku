@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.ui.reader.viewer.webtoon
 
 import android.content.res.Resources
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -14,6 +16,8 @@ import com.davemorrissey.labs.subscaleview.SubsamplingScaleImageView
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.databinding.ReaderErrorBinding
 import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderProgressIndicator
@@ -34,6 +38,7 @@ import tachiyomi.core.common.util.lang.withUIContext
 import tachiyomi.core.common.util.system.ImageUtil
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
+import kotlin.math.max
 
 /**
  * Holder of the webtoon reader for a single page of a chapter.
@@ -193,10 +198,20 @@ class WebtoonPageHolder(
 
         val streamFn = page?.stream ?: return
 
+        val currentPage = page ?: return
+        // KMK: bitmap for detection, decoded from the FINAL image (post rotate/split/crop)
+        var detectionBitmap: Bitmap? = null
+        val wantBubbleDetection = viewer.config.bubbleZoomEnabled &&
+            BubbleDetection.cached(bubbleKeyFor(currentPage)) == null &&
+            BubbleDetection.isSupported(context)
+
         try {
             val (source, isAnimated) = withIOContext {
                 val source = streamFn().use { process(Buffer().readFrom(it)) }
                 val isAnimated = ImageUtil.isAnimatedAndSupported(source)
+                if (!isAnimated && wantBubbleDetection) {
+                    detectionBitmap = decodeForDetection(source.peek())
+                }
                 Pair(source, isAnimated)
             }
             withUIContext {
@@ -213,13 +228,40 @@ class WebtoonPageHolder(
                 )
                 removeErrorLayout()
             }
+            // KMK --> Bubble Zoom: run detection on the final page image in the background
+            detectionBitmap?.let { bitmap ->
+                scope.launchIO {
+                    BubbleDetection.detect(context, bubbleKeyFor(currentPage), bitmap)
+                    bitmap.recycle()
+                }
+            }
+            // KMK <--
         } catch (e: Throwable) {
+            detectionBitmap?.recycle()
             logcat(LogPriority.ERROR, e)
             withUIContext {
                 setError(e)
             }
         }
     }
+
+    // KMK --> Bubble Zoom
+    /** Decodes [source] (a peek of the final page image) downscaled to at most [DETECTION_MAX_SIDE]. */
+    private fun decodeForDetection(source: BufferedSource): Bitmap? = try {
+        val bytes = source.readByteArray()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val longSide = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = max(1, longSide / DETECTION_MAX_SIDE)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    } catch (e: Throwable) {
+        logcat(LogPriority.WARN, e) { "Bubble detection decode failed" }
+        null
+    }
+    // KMK <--
 
     private fun process(imageSource: BufferedSource): BufferedSource {
         if (viewer.config.dualPageRotateToFit) {
@@ -325,3 +367,6 @@ class WebtoonPageHolder(
         }
     }
 }
+
+// KMK: longest side (px) the page is downscaled to before running bubble detection
+private const val DETECTION_MAX_SIDE = 1024

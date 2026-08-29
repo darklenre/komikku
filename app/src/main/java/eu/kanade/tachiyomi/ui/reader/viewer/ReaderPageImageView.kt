@@ -7,6 +7,7 @@ import android.graphics.drawable.Animatable
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.util.AttributeSet
+import android.util.Size
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.View
@@ -264,6 +265,59 @@ open class ReaderPageImageView @JvmOverloads constructor(
                 .start()
         }
     }
+
+    // KMK --> Bubble Zoom
+    private val ssivIfReady: SubsamplingScaleImageView?
+        get() = (pageView as? SubsamplingScaleImageView)?.takeIf { it.isReady }
+
+    /** Source-image size in px, or null if a [SubsamplingScaleImageView] isn't ready yet. */
+    fun sourceImageSize(): Size? = ssivIfReady?.let { Size(it.sWidth, it.sHeight) }
+
+    /** Map a point in this view's coordinates to source-image coordinates, or null. */
+    fun viewToSourceCoord(viewX: Float, viewY: Float): PointF? =
+        ssivIfReady?.viewToSourceCoord(viewX, viewY)
+
+    /**
+     * Animate so [rect] (source-image px) fills the viewport with a small margin, centered.
+     * No-op unless a ready [SubsamplingScaleImageView] backs this view (e.g. animated pages).
+     */
+    fun focusOnRect(rect: RectF, animate: Boolean = true, marginFraction: Float = 0.06f) {
+        val view = ssivIfReady ?: return
+        if (rect.width() <= 0f || rect.height() <= 0f) return
+        val usableW = view.width * (1f - 2f * marginFraction)
+        val usableH = view.height * (1f - 2f * marginFraction)
+        val target = minOf(usableW / rect.width(), usableH / rect.height(), view.maxScale)
+            .coerceAtLeast(view.minScale)
+        val center = PointF(rect.centerX(), rect.centerY())
+        val builder = view.animateScaleAndCenter(target, center)
+        if (animate && builder != null) {
+            builder
+                .withDuration(300)
+                .withEasing(EASE_IN_OUT_QUAD)
+                // Not interruptible: the trailing events of the triggering long-press would
+                // otherwise reach the SubsamplingScaleImageView and cancel this animation.
+                .withInterruptible(false)
+                .start()
+        } else {
+            view.setScaleAndCenter(target, center)
+        }
+    }
+
+    /** Restore the page to its fit-to-screen scale and center. */
+    fun resetZoom(animate: Boolean = true) {
+        val view = ssivIfReady ?: return
+        val center = PointF(view.sWidth / 2f, view.sHeight / 2f)
+        if (animate) {
+            view.animateScaleAndCenter(view.minScale, center)
+                ?.withDuration(300)
+                ?.withEasing(EASE_IN_OUT_QUAD)
+                ?.withInterruptible(false)
+                ?.start()
+        } else {
+            view.setScaleAndCenter(view.minScale, center)
+        }
+    }
+    // KMK <--
 
     private fun prepareNonAnimatedImageView() {
         if (pageView is SubsamplingScaleImageView) return
