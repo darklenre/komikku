@@ -13,7 +13,7 @@
 - Package `eu.kanade.tachiyomi.ui.reader.bubble`: `Bubble`, `BubbleDetector` (interface) + `NoopBubbleDetector` + `OnnxBubbleDetector`, `BubbleDetection` (façade: `isSupported`, LruCache), `BubbleReadingOrder` (LTR/RTL/VERTICAL), `bubbleKeyFor`.
 - Detection agganciata a `PagerPageHolder`/`WebtoonPageHolder.setImage()` sul **bitmap di display finale** (post split/merge/rotate/crop — Opzione A).
 - Guardia device: `BubbleDetection.isSupported` = 64-bit + `!isLowRamDevice` + RAM ≥ 2 GiB → altrimenti switch disabilitato e detection no-op.
-- Preferenza `bubbleZoom()` (`bubble_zoom`, default `false`) + `SwitchPreference` in `SettingsReaderScreen.getActionsGroup()` sotto "Show actions with long tap"; stringhe base `KMR` (`pref_bubble_zoom_long_tap`, `_summary`, `bubble_zoom_hint`).
+- Preferenza `bubbleZoom()` (`bubble_zoom`, default `false`) + `SwitchPreference` in `SettingsReaderScreen.getActionsGroup()` sotto "Show actions with long tap"; stringhe base `KMR` (`pref_bubble_zoom_long_tap`, `_summary`, `bubble_zoom_hint`). **→ da spostare in una sezione dedicata (item 4).**
 - Dip.: `com.microsoft.onnxruntime:onnxruntime-android:1.20.0` + `noCompress "onnx"` + keep rules R8 per `ai.onnxruntime.**` in `proguard-rules.pro`.
 
 **Modello int8 — pronto e bundlato:**
@@ -34,18 +34,18 @@
 
 | # | Item | Note |
 |---|---|---|
-| 1 | **Latenza reale su ARM** | Mai misurata (solo x86 desktop: ~500 ms fp32 1-thread). Fold8 ora accoppiato: misurare ms/pagina int8 @640 su `OnnxBubbleDetector`, e su un mid-range se possibile. Se troppo lenta → alzare la soglia RAM in `BubbleDetection` o valutare NNAPI EP. |
-| 2 | **Peso APK release** | `preview` arm64 = 84.7 MB, universal = 196.8 MB (con modello 26.3 MB flat + ORT ~8–16 MB/ABI). Misurare il delta vs build senza feature su `assembleRelease` e decidere se accettabile. Piano B se troppo: `onnxruntime-mobile` (build ridotta) o item 3. |
-| 3 | *(condizionato a 1–2)* **TFLite int8 + LiteRT** | Percorso maturo per YOLO su mobile: modello ~13 MB, veloce con delegate NNAPI/GPU. Costo: sostituire `onnxruntime-android` → `org.tensorflow:tensorflow-lite` (+ `-gpu`/`-support`) nell'app e riscrivere `OnnxBubbleDetector` → `TfliteBubbleDetector` (stesso pre/postprocess YOLOv8-detect, cambia solo l'API di inferenza e il layout tensori) — ~mezza giornata. Export: `YOLO(pt).export(format='tflite', int8=True, imgsz=640, data=…)`. Da fare **solo se** l'item 1 (latenza) o l'item 2 (peso) danno esito negativo con ORT. Il playground resta su ORT come riferimento del postprocess. |
-| 4 | **Indicazione visiva del tempo di elaborazione** | Oggi: se al long-tap la detection della pagina non è ancora pronta (`BubbleDetection.cached(key) == null`) si ricade in silenzio sul menu pagina. Serve un feedback — vedi §2.1. |
-| 5 | **Attribuzione licenza** | Aggiungere `ogkalu/comic-speech-bubble-detector-yolov8m` (Apache-2.0) alla schermata licenze open source + file `LICENSE`/`NOTICE` accanto a `assets/models/bubble_detector.onnx`. |
-| 6 | **Traduzioni** | Le 3 stringhe `KMR` sono solo in `base` (EN). IT e altre lingue via Weblate dopo il merge. |
-| 7 | **Issue upstream** | Aprire issue su `komikku-app/komikku` prima della PR (come da `CONTRIBUTING.md` per modifiche importanti): citare il precedente TachiyomiJ2K (#573, #1566), feature dietro preferenza `default = false`, modello Apache-2.0 bundlato. |
-| 8 | **Soglia banda reading-order** | `BubbleReadingOrder` usa `bandFactor = 0.5`. Validare su qualche pagina densa multi-colonna; ritoccare solo se sbaglia l'ordine. |
-| 9 | **Page-turn in Webtoon** | `advanceBubbleZoom` esiste solo in `PagerViewer`; `ReaderActivity.enterBubbleZoom` fa `onEdge` con `as? PagerViewer`. In Webtoon lo swipe oltre l'ultima/prima bubble della pagina non gira pagina (resta fermo, no crash). Serve una `WebtoonViewer.advanceBubbleZoom(forward)`: scroll del `RecyclerView` alla pagina succ./prec. + attesa holder/detection + re-enter sulla prima/ultima bubble; poi `onEdge` → `when (viewer) { is PagerViewer -> …; is WebtoonViewer -> … }`. |
-| 10 | *(rimandato)* Guardia batteria/termico | `ActivityManager`/`PowerManager` per degradare la detection su sessioni lunghe. Esplicitamente rinviato dall'utente. |
+| 1 | **Latenza reale su ARM** — ✅ misurata su Fold8 | **~217 ms mediana** (min 213, max 257 warmup, media 221), 19 pagine, int8 @640, 1 thread, input ≤1024 px lato lungo. Detection gira al decode pagina, off-UI: al long-tap è già in cache. Ampio margine. Il Fold8 è best-case (SoC di punta); un mid-range può stare ~2–4× → ~0.5–0.9 s, comunque accettabile perché asincrono + pre-calcolato, e coperto dalla barra dell'item 3. **Resta opzionale**: una misura su un device mid-range (il motore TFLite dell'item 5, con delegate NNAPI/GPU, è la leva se serve). |
+| 2 | **Peso APK release** — ✅ misurato, **accettato** | Confronto `preview` baseline `936e25bf99` vs `feature/bubble-zoom`: arm64 **39.8 → 84.7 MB (+44.9)**, v7a 33.9 → 73.4 (+39.5), universal 96.6 → 196.8 (+100.2). Delta arm64 = 26.3 (`bubble_detector.onnx`, `Stored`) + 17.6 (`libonnxruntime.so`, `Stored`) + 0.9 (`libonnxruntime4j_jni.so`) + ~0.1 dex. **Delta accettato dall'utente.** Con **entrambi** i motori bundlati (item 5) il costo arm64 sale a ~+62 MB (ONNX ~45 + TFLite ~17: `libtensorflowlite_jni.so` ~3–4 MB + `bubble_detector.tflite` ~13 MB) — anch'esso accettato. Feature comunque `default = false`. |
+| 3 | **Indicazione visiva del tempo di elaborazione** — ✅ fatto | `BubbleDetection.activeDetections: StateFlow<Int>` (incrementato/decrementato attorno a `detect()`); in `ReaderActivity.setComposeOverlay`, dentro il `Box`, un `LinearProgressIndicator` indeterminato `align(TopCenter).fillMaxWidth().statusBarsPadding()` visibile finché `activeDetections > 0`. Deviazione voluta da §2.1: "una detection qualsiasi in corso" invece di "la pagina corrente" — nessun plumbing per-pagina nel compose, e in pratica coincide (le detection attive sono quelle degli holder vicini). |
+| 4 | **Sezione "Bubble Zoom" nelle impostazioni Lettore + selettore motore** — ✅ fatto (Antigravity) | `SettingsReaderScreen.getBubbleZoomGroup()` (categoria dedicata: `SwitchPreference` attivazione + `ListPreference` motore, `enabled = supported && bubbleZoom`, `onValueChanged → BubbleDetection.onEngineChanged()`); voce vecchia rimossa da `getActionsGroup`. `ReaderPreferences.bubbleZoomEngine()` (`bubble_zoom_engine`, default `"onnx"`). Stringhe §2.2 in `base`. Il motore `tflite` diventa funzionante con l'item 5. |
+| 5 | **Secondo motore: TFLite + LiteRT — a fianco di ONNX, selezionabile** | Si bundlano **entrambi** i runtime ed **entrambi** i modelli; l'utente sceglie con `bubble_zoom_engine` (`onnx` = default / `tflite`). **Spec dettagliata delegata ad Antigravity in §5.** |
+| 6 | **Attribuzione licenza** — ✅ fatto | `app/src/main/assets/models/LICENSE` (testo Apache-2.0) + `NOTICE` (attribuzione ogkalu, commit `21d5af0a`, natura degli export int8). Voce nella schermata licenze open source via AboutLibraries: `aboutLibraries { collect { configPath = file("aboutlibraries-config") } }` in `app/build.gradle.kts` + `aboutlibraries-config/libraries/comic-speech-bubble-detector-yolov8m.json` (uniqueId `com.ogkalu:…`, tag "Bundled model", licenza `Apache-2.0`) + `aboutlibraries-config/licenses/apache-2-0.json` (testo completo, risolve offline). Verificato: la voce compare in `aboutlibraries.json` generato. Il `.tflite` (item 5) ricade sotto la stessa voce. |
+| 7 | **Traduzioni** | Le stringhe `KMR` (quelle esistenti + le nuove di §2.2) sono solo in `base` (EN). IT e altre lingue via Weblate dopo il merge. |
+| 8 | **Issue upstream** | Aprire issue su `komikku-app/komikku` prima della PR (come da `CONTRIBUTING.md` per modifiche importanti): citare il precedente TachiyomiJ2K (#573, #1566), feature dietro preferenza `default = false`, modelli Apache-2.0 bundlati, peso APK. |
+| 9 | **Soglia banda reading-order** | `BubbleReadingOrder` usa `bandFactor = 0.5`. Validare su qualche pagina densa multi-colonna; ritoccare solo se sbaglia l'ordine. |
+| 10 | **Page-turn in Webtoon** — ✅ fatto | `WebtoonViewer.advanceBubbleZoom(forward)`: da `currentPage` trova la prossima/precedente `ReaderPage` in `adapter.items` (salta le `ChapterTransition`), scrolla (`smoothScrollToPosition` o `layoutManager.scrollToPositionWithOffset`), poi poll (100 ms × 25) di `recycler.findViewHolderForAdapterPosition(pos).itemView as ReaderPageImageView` + `BubbleDetection.cached` → `onScrolled(pos)` per sincronizzare `currentPage` + `activity.enterBubbleZoom(image, pxRects, first/last)`. Ref del poll in campo, `removeCallbacks` in `destroy()`, guard `isFinishing/isDestroyed`. `ReaderActivity.enterBubbleZoom` `onEdge` → `when (viewer) { is PagerViewer -> …; is WebtoonViewer -> …; else -> false }`. Estratto `bubblePxRects(page, image)` condiviso con `tryEnterBubbleZoom`. |
 
-**Review `antigravity-analisys.md` (29 ago) — chiusi:** collisione cache key `InsertPage` con dual-page split (suffisso `:insert` in `bubbleKeyFor`); leak/uso su activity morta del poll in `PagerViewer.advanceBubbleZoom` (ref in campo + `removeCallbacks` in `destroy()` + guard `isFinishing/isDestroyed`); allocazioni per-inferenza in `OnnxBubbleDetector` (buffer `FloatArray`/`IntArray` preallocati e riusati, dispatcher single-thread); overlay non chiuso al cambio viewer/orientamento (`bubbleZoomOverlay.exit()` in `updateViewer()`). Resta aperto solo il page-turn Webtoon → item 9.
+**Review `antigravity-analisys.md` (29 ago) — tutti chiusi:** collisione cache key `InsertPage` con dual-page split (suffisso `:insert` in `bubbleKeyFor`); leak/uso su activity morta del poll in `PagerViewer.advanceBubbleZoom` (ref in campo + `removeCallbacks` in `destroy()` + guard `isFinishing/isDestroyed`); allocazioni per-inferenza in `OnnxBubbleDetector` (buffer `FloatArray`/`IntArray` preallocati e riusati, dispatcher single-thread); overlay non chiuso al cambio viewer/orientamento (`bubbleZoomOverlay.exit()` in `updateViewer()`); page-turn Webtoon → item 10 (fatto).
 
 ### 2.1 Indicazione di elaborazione
 
@@ -53,13 +53,40 @@
 
 Con la detection lanciata al caricamento pagina, al long-tap è quasi sempre già pronta: la barra si vede in pratica solo su prima pagina / device lenti.
 
+### 2.2 Sezione impostazioni "Bubble Zoom"
+
+Nuova categoria in `SettingsReaderScreen` (stesso pattern di `getNavigationGroup()` / `getActionsGroup()`: `@Composable fun getBubbleZoomGroup(): Preference.PreferenceGroup`), registrata nella lista dei gruppi della schermata *Impostazioni → Lettore*. L'intero gruppo è nascosto (o tutte le voci `enabled = false`) se `!BubbleDetection.isSupported(context)`.
+
+Voci nell'ordine:
+
+| Voce | Tipo | Pref | Note |
+|---|---|---|---|
+| attivazione | `SwitchPreference` | `bubble_zoom` (esiste, default `false`) | prima voce del gruppo |
+| motore di rilevamento | `ListPreference` | `bubble_zoom_engine` (nuova, `String`, default `"onnx"`) | `entries` = ONNX / TFLite; `enabled = bubbleZoom` |
+
+Stringhe base `KMR` (EN in `i18n-kmk/.../base/strings.xml`; IT indicativa, da rifinire con i traduttori):
+
+| key | EN | IT |
+|---|---|---|
+| `pref_category_bubble_zoom` | `Bubble Zoom` | `Zoom su nuvoletta` |
+| `pref_bubble_zoom_long_tap` *(riusata come titolo dello switch)* | `Bubble zoom with long tap` | `Zoom su nuvoletta con un tocco prolungato` |
+| `pref_bubble_zoom_long_tap_summary` *(esiste)* | `Long-tap a speech bubble to zoom into it. Long-tap elsewhere still opens the page actions.` | `Tieni premuto su una nuvoletta per ingrandirla. Tenendo premuto altrove si aprono comunque le azioni della pagina.` |
+| `pref_bubble_zoom_engine` | `Detection engine` | `Motore di rilevamento` |
+| `pref_bubble_zoom_engine_summary` | `%s` | `%s` |
+| `bubble_zoom_engine_onnx` | `ONNX Runtime` | `ONNX Runtime` |
+| `bubble_zoom_engine_tflite` | `TensorFlow Lite` | `TensorFlow Lite` |
+| `bubble_zoom_engine_onnx_desc` *(riga di aiuto nel dialog, opzionale)* | `Reference build. Slightly larger, no hardware acceleration.` | `Build di riferimento. Un po' più pesante, nessuna accelerazione hardware.` |
+| `bubble_zoom_engine_tflite_desc` *(idem)* | `Lighter, can use NNAPI / GPU acceleration.` | `Più leggera, può usare l'accelerazione NNAPI / GPU.` |
+
+`bubble_zoom_hint` resta invariata. La voce vecchia in `getActionsGroup()` viene **rimossa** (spostata qui).
+
 ---
 
 ## 3. Riferimenti tecnici da conservare
 
 - **Sorgente `.pt`** (per rigenerare l'ONNX, non a runtime): `https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m/resolve/21d5af0a9c69bb522b9968d6cc915f898d71a264/comic-speech-bubble-detector.pt` — SHA-256 `10bc9f702698148e079fb4462a6b910fcd69753e04838b54087ef91d5633097b`.
 - **Playground** `/mnt/data/src/kotlin/bubbleZoomPlayground/` — engine Kotlin puro (letterbox 640, decode `[1,5,8400]`, NMS IoU 0.45, reading-order, hit-test) con `YoloDetBubbleDetector` come **fonte di verità** per il postprocess. `models/` tiene int8 (26.3 MB), fp16 di riferimento (51.9 MB), fp32 sorgente (103.6 MB). `calib_set/` = 340 immagini di calibrazione. Immagini di ground-truth separate dalla calibrazione.
-- **I/O modello**: input `images` letterbox 640×640 `/255` grey 114; output detect `[1, 5, 8400]` = `cx,cy,w,h,score` in spazio 640; soglia 0.30, NMS 0.45; box normalizzati per `contentW = 640 - 2·padX`. Nessuna maschera.
+- **I/O modello**: input `images` letterbox 640×640 `/255` grey 114; output detect `[1, 5, 8400]` = `cx,cy,w,h,score` in spazio 640; soglia 0.30, NMS 0.45; box normalizzati per `contentW = 640 - 2·padX`. Nessuna maschera. **Il `.tflite` (item 5) esce dallo stesso `.pt`**, stesso input/postprocess; l'export TFLite può dare l'output trasposto (`[1, 8400, 5]`) o già con NMS — verificare il layout e disattivare l'NMS nell'export (`nms=False`) per riusare il decode esistente.
 - **Gotcha 1** — `focusOnRect`/`resetZoom` **devono** usare `animateScaleAndCenter(...).withInterruptible(false)`: con `true` gli eventi di coda del long-press raggiungono la `SubsamplingScaleImageView` e annullano l'animazione. `focusCurrent()` chiama `t.post { }` per lo stesso motivo.
 - **Gotcha 2** — R8 (build `preview`/`release`) elimina le classi `ai.onnxruntime.*` istanziate solo via JNI dal nativo → `SIGABRT` `mid == null` in `OrtSession.run`. Necessarie in `proguard-rules.pro`:
   ```
@@ -75,7 +102,169 @@ Con la detection lanciata al caricamento pagina, al long-tap è quasi sempre gi�
 
 ## 4. Post-v1 (fuori scope, dopo il merge)
 
-- Modello a **segmentazione** + OpenCV per hit-test su forme reali (bubble sovrapposte).
-- **Override per-manga** dell'on/off (meccanismo `SetMangaViewerFlags` già disponibile).
-- Voce nei **quick settings** in-reader (`GeneralSettingsPage.kt`).
-- Classi testo per OCR/TTS (richiede un modello con quelle classi).
+**Modello a segmentazione + OpenCV.** Oggi ogni bubble è un **rettangolo** e l'hit-test è `rect.contains(x, y)`: su bubble oblique, ovali o sovrapposte il rettangolo include sfondo/altre bubble, quindi un tap vicino al bordo può selezionare quella sbagliata e lo zoom si assesta impreciso. Un modello **seg** (es. `yolov8m-seg`) dà la **maschera della forma reale**; con `opencv-mobile` (~0.5 MB/ABI) si fa hit-test sul poligono e si ricava un box più aderente. Costo: modello più grande, dipendenza nativa in più, postprocess con prototipi di maschera. È il principale salto di qualità, non necessario per un v1 usabile.
+
+**Override per-manga dell'on/off.** Ora c'è un solo switch **globale** (Impostazioni → Lettore). Komikku ha già i viewer flags per-manga (`SetMangaViewerFlags`, come la modalità di lettura forzabile su una singola serie): esporre "Bubble Zoom: predefinito / sempre attivo / sempre disattivo" nelle impostazioni della serie, per attivarlo solo dove ci sono nuvolette con testo.
+
+**Toggle nei quick settings in-reader.** Il pannello dal basso del reader (`GeneralSettingsPage.kt`) ha gli interruttori rapidi (crop bordi, rotazione, …): aggiungere lì il toggle di Bubble Zoom per accenderlo/spegnerlo **senza uscire dalla lettura**. In v1 sta solo nelle impostazioni principali.
+
+**Classi testo per OCR/TTS.** Il modello v1 ha **una sola classe** ("bubble"). Modelli come `ogkalu/comic-text-and-bubble-detector` distinguono anche **testo**/caption: avendo la regione di testo separata si può alimentare un OCR (estrazione testo) e da lì TTS / traduzione al volo. Feature distinta che riusa solo l'infrastruttura di detection.
+
+---
+
+## 5. Work order — secondo motore TFLite + LiteRT (delegato ad Antigravity)
+
+*Spec autosufficiente. Chi la esegue parte a freddo: seguirla alla lettera, in ordine. Obiettivo: aggiungere un secondo motore di rilevamento bubble basato su TensorFlow Lite / LiteRT, **a fianco** di quello ONNX già esistente e **senza toccarne il comportamento**, selezionabile a runtime da una preferenza. Al termine, con `bubble_zoom_engine = tflite` la feature Bubble Zoom deve comportarsi in modo indistinguibile da `onnx` (stesse bubble, stesso ordine, stesso zoom) sulle pagine di test.*
+
+### 5.0 Contesto (cosa esiste già)
+
+- Package `eu.kanade.tachiyomi.ui.reader.bubble`:
+  - `Bubble(rect: RectF /* 0..1 */, confidence: Float)`
+  - `interface BubbleDetector { val isAvailable: Boolean; suspend fun detect(bitmap: Bitmap): List<Bubble> }`
+  - `object NoopBubbleDetector` — `isAvailable = false`, ritorna lista vuota
+  - `class OnnxBubbleDetector(context) : BubbleDetector` — ONNX Runtime, modello `assets/models/bubble_detector.onnx`
+  - `object BubbleDetection` — façade: `isSupported(context)` (64-bit + `!isLowRamDevice` + RAM ≥ 2 GiB), `LruCache<String, List<Bubble>>(32)`, `detectorFor(appContext)` che istanzia **una volta** `OnnxBubbleDetector` o `NoopBubbleDetector` e lo tiene in `@Volatile var detector`
+  - `BubbleReadingOrder`, `bubbleKeyFor(page)` — non si toccano
+- `OnnxBubbleDetector` fa: letterbox a 640 (gain = `min(640/w, 640/h)`, pad centrato, riempimento grigio `114/255`), tensore **NCHW** `[1,3,640,640]` float32 `[0,1]`, `OrtSession.run`, output atteso `[1,5,8400]` → transpose logica a `[features][anchors]`, poi `decode()`: soglia `CONF_THRESHOLD = 0.30`, box `cx,cy,w,h` → `xyxy` in **spazio 640**, NMS `IOU_THRESHOLD = 0.45`, infine mappa da 640-letterbox a **0..1 normalizzato** togliendo il padding (`(coord - pad) / (640 - 2*pad)`).
+- `preview`/`release` hanno R8 attivo; le classi usate solo via JNI vanno tenute (vedi §5.7).
+
+### 5.1 Primo passo — estrarre il postprocess condiviso (nessun cambio di comportamento)
+
+Per garantire parità bit-a-bit del postprocess tra i due motori, estrarre da `OnnxBubbleDetector` in un nuovo file `bubble/BubblePostprocess.kt` (funzioni top-level o `internal object`):
+
+```kotlin
+internal data class Letterbox(val gain: Float, val padX: Int, val padY: Int, val inputSize: Int = 640)
+
+internal fun letterboxOf(srcW: Int, srcH: Int, inputSize: Int = 640): Letterbox
+
+/** [featureMajor] = [features][anchors], features = 4 + numClassi (qui 5).
+ *  [coordsIn640Space] = true se cx,cy,w,h sono in pixel 0..640 (ONNX),
+ *  false se già normalizzati 0..1 rispetto al quadrato letterbox (tipico export TFLite). */
+internal fun decodeDetections(
+    featureMajor: Array<FloatArray>,
+    lb: Letterbox,
+    coordsIn640Space: Boolean,
+    confThreshold: Float = 0.30f,
+    iouThreshold: Float = 0.45f,
+): List<Bubble>
+```
+
+`OnnxBubbleDetector` dopo il refactor deve chiamare `decodeDetections(out, lb, coordsIn640Space = true)` e restare **funzionalmente identico** (verificare con §5.8 prima di procedere). Spostare qui anche `Det`, `iou`, e la costruzione del letterbox. La preparazione dell'input (packing dei pixel nel tensore) **non** è condivisa: NCHW per ONNX, NHWC per TFLite.
+
+### 5.2 Dipendenze
+
+In `gradle/libs.versions.toml` (sezione KMK, vicino a `onnxruntime-android`):
+
+```toml
+# LiteRT (ex TensorFlow Lite) — secondo motore Bubble Zoom
+litert = "com.google.ai.edge.litert:litert:<ultima stabile>"
+litert-gpu = "com.google.ai.edge.litert:litert-gpu:<stessa versione>"
+```
+
+*(Se la versione LiteRT dà problemi di risoluzione/AGP, ripiegare su `org.tensorflow:tensorflow-lite:2.16.1` + `org.tensorflow:tensorflow-lite-gpu:2.16.1`; l'API `Interpreter` è la stessa.)*
+
+In `app/build.gradle.kts`, sezione KMK:
+
+```kotlin
+implementation(libs.litert)
+implementation(libs.litert.gpu) // opzionale ma consigliato: delegate GPU
+```
+
+`androidResources { noCompress += "tflite" }` accanto all'esistente `noCompress += "onnx"` (stesso blocco).
+
+### 5.3 Export del modello `.tflite`
+
+Nel playground (`/mnt/data/src/kotlin/bubbleZoomPlayground/`), con l'ambiente `ultralytics` già usato per l'export ONNX:
+
+```python
+from ultralytics import YOLO
+m = YOLO("models/ogkalu_yolov8m.pt")   # stesso .pt sorgente dell'ONNX
+m.export(format="tflite", int8=True, imgsz=640, nms=False,
+         data="calib_yolo/data.yaml")  # stesso data.yaml di calibrazione dell'ONNX
+```
+
+Output atteso: `..._full_integer_quant.tflite` (o `_int8.tflite`) ~11–14 MB. Rinominare in `bubble_detector.tflite`.
+
+**Verificare** (ispezione con `Interpreter` o Netron):
+- shape input: `[1, 640, 640, 3]` **NHWC**;
+- dtype input: `uint8`/`int8` (con `quantization: scale, zero_point`) oppure `float32` se Ultralytics ha inserito i nodi quantize/dequantize ai bordi — **gestire il caso reale**, non assumere;
+- shape output: `[1, 5, 8400]` oppure `[1, 8400, 5]` (trasposto) — annotare quale;
+- scala delle coordinate output: normalizzate `0..1` (più probabile per TFLite) o pixel `0..640` — annotare quale, serve per il flag `coordsIn640Space`.
+
+Copiare il file in `app/src/main/assets/models/bubble_detector.tflite`. Annotare dimensione byte + SHA-256 in §3 del piano.
+
+### 5.4 `TfliteBubbleDetector`
+
+Nuovo file `bubble/TfliteBubbleDetector.kt`, `class TfliteBubbleDetector(context: Context) : BubbleDetector`. Struttura speculare a `OnnxBubbleDetector`:
+
+- **Dispatcher**: `Executors.newSingleThreadExecutor { Thread(it, "bubble-detect-tfl").apply { isDaemon = true } }.asCoroutineDispatcher()`.
+- **Init** (nel costruttore, in `try/catch`, `isAvailable = interpreter != null`):
+  - caricare il modello con `FileUtil.loadMappedFile(context, "models/bubble_detector.tflite")` **oppure** leggere gli asset in un `MappedByteBuffer`/`ByteBuffer` diretto (l'asset è `noCompress`, quindi mmap possibile);
+  - `Interpreter.Options()`:
+    - provare in ordine: **GPU delegate** (`GpuDelegateFactory` / `new GpuDelegate()`) se `CompatibilityList().isDelegateSupportedOnThisDevice`, altrimenti **XNNPACK** (`setUseXNNPACK(true)`, on di default) su `setNumThreads(2)`;
+    - **non** usare il delegate NNAPI (deprecato da Android 15 / API 35);
+    - se la creazione col GPU delegate fallisce, fare fallback a CPU e loggare (`logcat`).
+  - tenere riferimenti a `interpreter`, all'eventuale `delegate` (per `close()`), e ai parametri di quantizzazione input/output letti da `interpreter.getInputTensor(0)` / `getOutputTensor(0)`.
+- **`detect(bitmap)`**: `withContext(dispatcher) { runCatching { infer(bitmap) }.getOrDefault(emptyList()) }`, con log di latenza opzionale allineato a quello ONNX.
+- **`infer(bitmap)`**:
+  1. `val lb = letterboxOf(bitmap.width, bitmap.height)`;
+  2. scalare il bitmap a `nw×nh` (come ONNX), `getPixels` in un `IntArray` **preallocato come campo** (`IntArray(640*640)`), poi impacchettare in un **buffer NHWC preallocato**:
+     - se input `float32`: `ByteBuffer.allocateDirect(1*640*640*3*4).order(nativeOrder()).asFloatBuffer()`, riempire con grigio `114/255f` e poi i pixel `R,G,B` nell'ordine HWC (`idx = (y*640 + x)*3`), valori `[0,1]`;
+     - se input `int8`/`uint8`: `ByteBuffer.allocateDirect(1*640*640*3)`, applicare la quantizzazione `q = round(v/scale) + zeroPoint` con `v` in `[0,1]` (o `[0,255]` a seconda di scale) e clamp al range del dtype; grigio letterbox = quant di `114/255` (o `114`).
+  3. output: `Array(1){ Array(F){ FloatArray(A) } }` con `F,A` secondo lo shape reale; se il tensore d'uscita è int8/uint8, dequantizzare (`(q - zeroPoint) * scale`) in un `FloatArray` prima del decode;
+  4. normalizzare la forma a `featureMajor: Array<FloatArray>` `[5][8400]` (transpose in memoria se l'output è `[1,8400,5]`);
+  5. `return decodeDetections(featureMajor, lb, coordsIn640Space = <valore annotato in §5.3>)`.
+- **`close()`** (aggiungere anche a `BubbleDetector`? no — aggiungere un `fun close()` opzionale solo su `Onnx`/`Tflite`, chiamato da `BubbleDetection` quando cambia motore): `interpreter?.close(); delegate?.close(); dispatcher.close()`.
+
+Tutti i buffer grandi (input `ByteBuffer`/`FloatBuffer`, `IntArray` pixel, `FloatArray` output dequantizzato) **preallocati come campi** e riusati — coerente con la stessa ottimizzazione già fatta su `OnnxBubbleDetector` (inferenza serializzata sul dispatcher).
+
+### 5.5 Selezione del motore in `BubbleDetection`
+
+- Nuova pref in `ReaderPreferences.kt` (blocco KMK, accanto a `bubbleZoom()`):
+  ```kotlin
+  fun bubbleZoomEngine() = preferenceStore.getString("bubble_zoom_engine", "onnx")
+  ```
+  *(String semplice; valori ammessi `"onnx"` | `"tflite"`. In alternativa un `enum class BubbleEngine { ONNX, TFLITE }` con `getEnum`.)*
+- `BubbleDetection`:
+  - `detectorFor(appContext)` sceglie in base a `Injekt.get<ReaderPreferences>().bubbleZoomEngine().get()`:
+    `"tflite"` → `TfliteBubbleDetector(appContext)`, altrimenti `OnnxBubbleDetector(appContext)`; se `!isSupported` → `NoopBubbleDetector` (invariato).
+  - aggiungere `fun onEngineChanged()`: `synchronized(this) { (detector as? …)?.close(); detector = null; cache.evictAll() }`. Chiamarla da un `bubbleZoomEngine().changes()` collector (scope applicativo) **oppure** registrando nel punto in cui si registrano le altre reader pref. Deve bastare che alla successiva pagina la detection riparta col nuovo motore; le bubble già in cache per pagine viste vanno buttate.
+  - `isSupported` invariato (vale per entrambi i motori).
+- `ViewerConfig` / `PagerPageHolder` / `WebtoonPageHolder` / `PagerViewer` / `WebtoonViewer` / `ReaderActivity`: **nessuna modifica** — vedono solo `BubbleDetection`.
+
+### 5.6 Impostazioni (sezione dedicata)
+
+Implementare la sezione "Bubble Zoom" descritta in **§2.2** (categoria dedicata in `SettingsReaderScreen`, switch attivazione + `ListPreference` motore) con le stringhe lì elencate. Se questa parte viene fatta separatamente, il work order TFLite può intanto pilotare `bubble_zoom_engine` via `adb shell` / editor prefs per i test.
+
+`ListPreference`: `entries` = `[bubble_zoom_engine_onnx, bubble_zoom_engine_tflite]`, `values` = `["onnx", "tflite"]`, `enabled = bubbleZoom` (segue lo switch). `onValueChanged` → `BubbleDetection.onEngineChanged()`.
+
+### 5.7 R8 / ProGuard
+
+In `app/proguard-rules.pro`, blocco KMK accanto alle regole `ai.onnxruntime.**`:
+
+```
+# LiteRT / TensorFlow Lite (Bubble Zoom, secondo motore): JNI reflection dal nativo
+-keep class org.tensorflow.lite.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+-dontwarn org.tensorflow.lite.**
+-dontwarn com.google.ai.edge.litert.**
+```
+
+Verificare che un build `preview` (R8 attivo) **non** crashi con `mid == null` / `NoSuchMethodError` al primo `detect` col motore TFLite (stesso tipo di problema visto con ORT — vedi §3 Gotcha 2).
+
+### 5.8 Test e criteri di accettazione
+
+1. **Playground / parità postprocess** — dopo §5.1, rieseguire la validazione ONNX esistente sulle 5 pagine ground-truth (`k006=10, k009=14, 5-9bed=8, 4-4d9c=9, 8-b8a3=11`): i conteggi **non devono cambiare**.
+2. **Parità TFLite vs ONNX** — sulle stesse 5 pagine, il motore TFLite deve dare gli **stessi conteggi** (±1 tollerato solo se dovuto alla quantizzazione, da giustificare) e box visivamente sovrapponibili (IoU alto). Se il `.tflite` sbaglia sistematicamente le coordinate → è quasi sempre il flag `coordsIn640Space` o l'ordine HWC/quantizzazione dell'input: ricontrollare §5.3/§5.4.
+3. **Emulatore x86** (`Pixel_9_Pro_XL`, build debug): con `bubble_zoom_engine = tflite`, aprire un capitolo Pager e uno Webtoon → long-tap su bubble → zoom corretto; swipe → navigazione; tap/back → uscita. Cambio motore da impostazioni → la pagina successiva usa il nuovo motore, nessun crash.
+4. **Z Fold8** (build `preview`, R8): reinstallare, ripetere il flusso col motore TFLite; misurare la latenza per pagina come fatto per ONNX (~217 ms mediana il riferimento) e annotarla in §2 item 1. Verificare quale delegate è attivo (log).
+5. `./gradlew :app:compileDebugKotlin spotlessKotlinCheck` verde; build `:app:assemblePreview` verde.
+6. **Peso**: annotare il nuovo delta APK arm64 (atteso ~+17 MB rispetto al solo-ONNX) in §2 item 2.
+
+### 5.9 Rischi noti specifici TFLite
+
+- **Layout NHWC** e **coordinate normalizzate 0..1**: differenze rispetto a ONNX; sono la causa n.1 di box sbagliati. Il flag `coordsIn640Space` e l'ordine di packing HWC vanno verificati sull'export reale, non assunti.
+- **Quantizzazione I/O**: se l'export tiene input/output `int8`, servono le operazioni di (de)quantizzazione con `scale`/`zero_point` letti a runtime dal tensore. Se invece Ultralytics inserisce quantize/dequantize ai bordi (I/O `float32`), il codice è più semplice — decidere in base al modello prodotto.
+- **GPU delegate**: su alcuni chip il delegate GPU fallisce o dà risultati leggermente diversi; il fallback CPU/XNNPACK deve essere sempre presente e testato.
+- **Dimensione LiteRT**: se `litert` + `litert-gpu` insieme superano l'atteso (~4 MB/ABI), valutare di tenere solo `litert` (CPU/XNNPACK) e rimandare il GPU delegate.
+- Il motore ONNX resta il **default** e la via di riferimento: qualunque regressione sul path ONNX durante il refactor §5.1 è bloccante.

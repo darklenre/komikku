@@ -189,6 +189,13 @@ kotlin {
     }
 }
 
+// KMK: register the bundled Bubble Zoom detection model in the open-source licenses screen
+aboutLibraries {
+    collect {
+        configPath = file("aboutlibraries-config")
+    }
+}
+
 dependencies {
     implementation(projects.i18n)
     // KMK -->
