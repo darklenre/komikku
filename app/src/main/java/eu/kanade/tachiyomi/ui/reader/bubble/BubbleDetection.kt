@@ -6,6 +6,10 @@ import android.graphics.Bitmap
 import android.os.Process
 import android.util.LruCache
 import androidx.core.content.getSystemService
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -27,6 +31,11 @@ object BubbleDetection {
     @Volatile
     private var detector: BubbleDetector? = null
 
+    private val _activeDetections = MutableStateFlow(0)
+
+    /** How many page detections are running right now; drives the reader's processing indicator. */
+    val activeDetections: StateFlow<Int> = _activeDetections.asStateFlow()
+
     /** Whether this device can run bubble detection at all (used to gate the setting + the work). */
     fun isSupported(context: Context): Boolean {
         if (!Process.is64Bit()) return false
@@ -41,12 +50,24 @@ object BubbleDetection {
     /** Detects bubbles on [bitmap] (the final page image), caching under [key]. */
     suspend fun detect(context: Context, key: String, bitmap: Bitmap): List<Bubble> {
         cache.get(key)?.let { return it }
-        val result = detectorFor(context.applicationContext)
-            .takeIf { it.isAvailable }
-            ?.detect(bitmap)
-            ?: emptyList()
-        cache.put(key, result)
-        return result
+        _activeDetections.update { it + 1 }
+        try {
+            val result = detectorFor(context.applicationContext)
+                .takeIf { it.isAvailable }
+                ?.detect(bitmap)
+                ?: emptyList()
+            cache.put(key, result)
+            return result
+        } finally {
+            _activeDetections.update { it - 1 }
+        }
+    }
+
+    fun onEngineChanged() {
+        synchronized(this) {
+            detector = null
+            cache.evictAll()
+        }
     }
 
     private fun detectorFor(appContext: Context): BubbleDetector {
