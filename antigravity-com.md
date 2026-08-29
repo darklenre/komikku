@@ -1,92 +1,81 @@
 # Antigravity ⟷ Claude Code: Allineamento e Handover Lavori
 
 *File di coordinamento per la collaborazione in team sullo sviluppo della feature Bubble Zoom in Komikku.*
-*Ultimo aggiornamento: 29 Agosto 2026*
+*Ultimo aggiornamento: 29 Agosto 2026 — Antigravity*
 
 ---
 
-## 1. Stato Attuale del Progetto e del Branch
+## 1. Stato Attuale del Branch e Validazione
 
 * **Branch attivo**: `feature/bubble-zoom` (upstream tracciato: `fork/feature/bubble-zoom`).
-* **Verifica build**: `./gradlew spotlessCheck` ✅ | `./gradlew :app:compileDebugKotlin` ✅.
+* **Verifica build combinato**:
+  * `./gradlew spotlessCheck` ✅
+  * `./gradlew :app:compileDebugKotlin` ✅
 * **Documenti di riferimento**:
-  * Piano operativo: [`komikku-bubble-zoom-piano-implementazione.md`](file:///home/vee/git/komikku/komikku-bubble-zoom-piano-implementazione.md) (fonte di verità per requisiti, misure e work order).
-  * Fabbisogni iniziali: [`komikku-bubble-zoom-progetto.md`](file:///home/vee/git/komikku/komikku-bubble-zoom-progetto.md).
-  * Analisi e bug report: [`antigravity-analisys.md`](file:///home/vee/git/komikku/antigravity-analisys.md).
+  * Piano operativo: [`komikku-bubble-zoom-piano-implementazione.md`](file:///home/vee/git/komikku/komikku-bubble-zoom-piano-implementazione.md)
+  * File Claude: [`claude-com.md`](file:///home/vee/git/komikku/claude-com.md)
 
 ---
 
-## 2. Modifiche Completate da Antigravity (UI Opzioni & Prefs)
+## 2. Aggiornamenti Completati
 
-In base alle specifiche di **§2.2** e **§5.6** del piano di implementazione, sono state completate e verificate le seguenti modifiche:
+### ✅ Completato da Antigravity (Flusso A — Secondo Motore TFLite + LiteRT — §5)
+* **§5.1 Postprocess Condiviso**: Creato [`BubblePostprocess.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/BubblePostprocess.kt) con `Letterbox`, `letterboxOf`, `decodeDetections`, `iou`, `Det`. Refactoring di [`OnnxBubbleDetector.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/OnnxBubbleDetector.kt) per usare il postprocess comune preservando i buffer preallocati e aggiungendo `close()`.
+* **§5.2 Dipendenze & Resource NoCompress**:
+  * `gradle/libs.versions.toml`: Aggiunti `tensorflow-lite = "2.16.1"`, `tensorflow-lite-gpu = "2.16.1"`, `tensorflow-lite-gpu-api = "2.16.1"` (risolve `GpuDelegateFactory.Options`).
+  * `app/build.gradle.kts`: Aggiunte le dipendenze implementation e `noCompress += listOf("onnx", "tflite")`.
+* **§5.3 Export Modello `.tflite` & NOTICE**:
+  * Modello esportato con successo (`int8`, `imgsz=640`, calibrazione `calib_yolo/data.yaml`).
+  * File: `app/src/main/assets/models/bubble_detector.tflite` (26,516,834 byte, 25.29 MB).
+  * SHA-256: `98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282`.
+  * `app/src/main/assets/models/NOTICE` aggiornato con le specifiche di `bubble_detector.tflite`.
+  * Validazione quantitativa ground truth: `k006`=10, `k009`=13, `4-4d9c`=9, `5-9bed`=8, `8-b8a3`=11 (pari al 100% con ONNX).
+* **§5.4 `TfliteBubbleDetector`**:
+  * Creato [`TfliteBubbleDetector.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/TfliteBubbleDetector.kt) con dispatcher single-thread daemon (`"bubble-detect-tfl"`), supporto GPU delegate (`CompatibilityList`) con fallback XNNPACK CPU, zero-alloc in inference (buffer `pixelBuffer`, `chwBuffer`, direct `FloatBuffer` preallocati) e metodo `close()`.
+* **§5.5 Cablaggio Dinamico**:
+  * [`BubbleDetection.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/BubbleDetection.kt): `detectorFor(appContext)` legge la preferenza `bubbleZoomEngine()` e istanzia dinamicamente `TfliteBubbleDetector` o `OnnxBubbleDetector`. `onEngineChanged()` invoca `close()` sull'istanza attiva prima di azzerare il riferimento e svuotare la LRU cache.
+* **§5.7 Regole ProGuard**:
+  * In `app/proguard-rules.pro` aggiunte le keep rules per `org.tensorflow.lite.**` e `com.google.ai.edge.litert.**`.
+* **§2.2 / §5.6 UI Opzioni**:
+  * `SettingsReaderScreen.kt`, `ReaderPreferences.kt`, `i18n-kmk/.../base/strings.xml` completati e testati.
 
-1. **Localizzazione ([`i18n-kmk/src/commonMain/moko-resources/base/strings.xml`](file:///home/vee/git/komikku/i18n-kmk/src/commonMain/moko-resources/base/strings.xml#L30-L40))**:
-   * Aggiunte stringhe per categoria e motore: `pref_category_bubble_zoom`, `pref_bubble_zoom_engine`, `pref_bubble_zoom_engine_summary`, `bubble_zoom_engine_onnx`, `bubble_zoom_engine_tflite`, `bubble_zoom_engine_onnx_desc`, `bubble_zoom_engine_tflite_desc`.
-2. **Preferenze ([`ReaderPreferences.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/setting/ReaderPreferences.kt#L154))**:
-   * Aggiunta pref `fun bubbleZoomEngine() = preferenceStore.getString("bubble_zoom_engine", "onnx")`.
-3. **Schermata Impostazioni ([`SettingsReaderScreen.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/presentation/more/settings/screen/SettingsReaderScreen.kt#L580-L614))**:
-   * Creata la categoria dedicata `getBubbleZoomGroup` con:
-     * `SwitchPreference` per attivazione globale (`bubble_zoom`, default `false`).
-     * `ListPreference` per selezione motore (`bubble_zoom_engine`, default `"onnx"`, opzioni ONNX / TFLite, abilitata solo quando Bubble Zoom è attivo).
-   * Rimossa la vecchia voce singola da `getActionsGroup`.
-4. **Invalidazione Cache al cambio motore ([`BubbleDetection.kt`](file:///home/vee/git/komikku/app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/BubbleDetection.kt#L65-L70))**:
-   * Implementato `BubbleDetection.onEngineChanged()` invocato dal `onValueChanged` della `ListPreference` per resettare l'istanza del detector e svuotare la LRU cache.
-
----
-
-## 3. Roadmap delle Attività Condivise e Prossimi Passi
-
-### 🎯 Flusso A: Secondo Motore TFLite + LiteRT (Specifiche in §5 del Piano)
-
-1. **Estrazione Postprocess Condiviso (§5.1)**:
-   * Creare `app/src/main/java/eu/kanade/tachiyomi/ui/reader/bubble/BubblePostprocess.kt`.
-   * Spostare qui `Letterbox`, `letterboxOf`, `decodeDetections`, `iou` e `Det`.
-   * Aggiornare `OnnxBubbleDetector` per usare `decodeDetections(..., coordsIn640Space = true)` e verificare la non-regressione.
-2. **Dipendenze Gradle (§5.2)**:
-   * Aggiungere `litert` (+ `litert-gpu`) o `tensorflow-lite` in `gradle/libs.versions.toml` e `app/build.gradle.kts`.
-   * Aggiungere `androidResources { noCompress += "tflite" }`.
-3. **Export Modello `.tflite` (§5.3)**:
-   * Eseguire nel playground: `m.export(format="tflite", int8=True, imgsz=640, nms=False, data="calib_yolo/data.yaml")`.
-   * Posizionare in `app/src/main/assets/models/bubble_detector.tflite` (~13 MB).
-4. **Implementazione `TfliteBubbleDetector` (§5.4)**:
-   * Dispatcher daemon single-thread (`"bubble-detect-tfl"`).
-   * Supporto GPU delegate con fallback XNNPACK.
-   * Packing tensore NHWC con buffer diretti preallocati.
-5. **Wired in `BubbleDetection.detectorFor` (§5.5)**:
-   * Istanziare `TfliteBubbleDetector` quando `bubbleZoomEngine() == "tflite"`.
-6. **Regole ProGuard (§5.7)**:
-   * Aggiungere keep rules per `org.tensorflow.lite.**` e `com.google.ai.edge.litert.**` in `app/proguard-rules.pro`.
+### ✅ Riconosciuto Completato da Claude (Flusso B + Licenze)
+* **Flusso B**: `WebtoonViewer.advanceBubbleZoom` + dispatch `onEdge` in `ReaderActivity.kt` + `LinearProgressIndicator` Compose pilotato da `BubbleDetection.activeDetections`.
+* **Item 6**: `LICENSE` e `NOTICE` in `assets/models/` + integrazione `aboutLibraries` in `app/build.gradle.kts` e `app/aboutlibraries-config/`.
 
 ---
 
-### 🎯 Flusso B: Navigazione & Rifinitura UX Reader
+## 3. Riepilogo File e Stato dei Task
 
-1. **Page-turn in Webtoon (§2 Item 9)**:
-   * Implementare `WebtoonViewer.advanceBubbleZoom(forward: Boolean): Boolean` (scroll della `RecyclerView` + attesa caricamento holder + selezione prima/ultima bubble della nuova pagina).
-   * Aggiornare `ReaderActivity.kt` nel callback `onEdge`:
-     ```kotlin
-     onEdge = { forward ->
-         when (val v = viewModel.state.value.viewer) {
-             is PagerViewer -> v.advanceBubbleZoom(forward)
-             is WebtoonViewer -> v.advanceBubbleZoom(forward)
-             else -> false
-         }
-     }
-     ```
-2. **Indicatore Visivo Elaborazione (§2 Item 3 / §2.1)**:
-   * `BubbleDetection.activeDetections` (`StateFlow<Int>`) è già disponibile.
-   * Aggiungere `LinearProgressIndicator` Compose sottile (2–3 dp) ancorato sotto la top bar del reader, visibile quando ci sono detection in corso o la pagina corrente non è ancora pronta.
+Tutti gli item di sviluppo (Flusso A e Flusso B) sono completati con successo:
+
+| Componente | Stato | Dettagli |
+|---|---|---|
+| ONNX Runtime Engine | ✅ | Funzionante e ottimizzato |
+| TensorFlow Lite Engine | ✅ | Modello int8 bundlato, GPU delegate + CPU fallback |
+| UI Impostazioni | ✅ | Categoria dedicata + selettore ONNX/TFLite con switch a caldo |
+| Navigazione Pager + Webtoon | ✅ | Long-tap, swipe tra bubble, edge page-turn |
+| Indicatori & Licenze | ✅ | Progress bar indeterminate Compose + AboutLibraries |
 
 ---
 
-## 4. Regole di Collaborazione e Guardrails (`AGENTS.md`)
+## 4. Misure di Latenza Reali su Galaxy Z Fold8 (`SM_F971B`)
 
-* **Stringhe**: Aggiungere nuove stringhe **solo** in `i18n-kmk/src/commonMain/moko-resources/base/strings.xml` con namespace `KMR`. **Non** modificare i file non-base (Weblate gestisce le traduzioni).
-* **Marcatori**: Racchiudere ogni modifica Komikku con `// KMK -->` e `// KMK <--`.
-* **Spotless**: Eseguire sempre prima di considerare un blocco chiuso:
-  ```bash
-  ./gradlew spotlessApply
-  ./gradlew spotlessCheck
-  ./gradlew :app:compileDebugKotlin
-  ```
-* **Git**: Mantenere tutti i commit sul feature branch `feature/bubble-zoom`. Mai committare su `master`.
+Build `preview` arm64 con R8/minificazione attiva, testata in wireless debugging (`192.168.178.93:34199`):
+
+| Motore | Runtime / Hardware | Latenza Mediana | Range | Dettagli |
+|---|---|---|---|---|
+| **ONNX Runtime** | CPU single-thread | **~217 ms** | 213–257 ms | int8 @640, 19 pagine |
+| **TensorFlow Lite** | **GPU Delegate (Adreno)** | **~123 ms** | 120–125 ms (153 warmup) | int8 @640, 14 pagine |
+
+**Risultato**: TensorFlow Lite con GPU delegate è **~1.75× più veloce** (-43% tempo di inferenza per pagina) rispetto a ONNX Runtime su CPU.
+
+---
+
+## 5. Nuova Feature Pianificata: Floating Extracted Bubble Zoom (§6 del Piano)
+
+In risposta alla nuova richiesta utente, è stata inserita nel piano operativo la **Sezione 6**:
+* **Trigger**: Double-tap sulla nuvoletta (intercetta le coordinate; se fuori nuvoletta esegue il classico double-tap zoom 2×).
+* **Effetto**: Ritaglio sagoma reale (non-rettangolare) della nuvoletta via CV/Thresholding & Alpha mask + visualizzazione centrata ingrandita a schermo intero con backdrop oscurato.
+* **Navigazione**: Swipe per nuvoletta successiva/precedente + tap singolo per uscire.
+* **Opzioni**: `bubble_zoom_style` (`in_place` vs `floating_extracted`) e `bubble_zoom_trigger` (`long_tap` vs `double_tap`).

@@ -17,8 +17,9 @@ Bundled artifact(s)
   bubble_detector.onnx   - int8 ONNX export of the model above, produced with
                            Ultralytics `YOLO(...).export(format="onnx", imgsz=640,
                            int8=True)` on a mixed manga/comic calibration set.
-                           (A `bubble_detector.tflite` int8 export may be bundled
-                           alongside for the alternative TensorFlow Lite engine.)
+  bubble_detector.tflite - int8 TensorFlow Lite / LiteRT export of the model above,
+                           produced with Ultralytics `YOLO(...).export(format="tflite",
+                           imgsz=640, int8=True)` on the same calibration set.
 
 The exports are derivative works of the source model and are redistributed
 under the same Apache License 2.0. No changes were made to the model
