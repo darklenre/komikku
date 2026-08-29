@@ -563,15 +563,58 @@ object SettingsReaderScreen : SearchableSettings {
         val context = LocalContext.current
         val bubbleZoomSupported = remember { BubbleDetection.isSupported(context) }
         val bubbleZoomPref = readerPreferences.bubbleZoom()
+        val isBubbleZoomEnabled by bubbleZoomPref.collectAsState()
+
+        val enginePref = readerPreferences.bubbleZoomEngine()
+        val inPlaceGesturePref = readerPreferences.bubbleZoomInPlaceGesture()
+        val floatingGesturePref = readerPreferences.bubbleZoomFloatingGesture()
+        val floatingBackdropPref = readerPreferences.bubbleZoomFloatingBackdrop()
+
+        val gestureEntries = persistentMapOf(
+            "long_tap" to stringResource(KMR.strings.bubble_zoom_gesture_long_tap),
+            "double_tap" to stringResource(KMR.strings.bubble_zoom_gesture_double_tap),
+            "disabled" to stringResource(KMR.strings.bubble_zoom_gesture_disabled),
+        )
 
         return Preference.PreferenceGroup(
             title = stringResource(KMR.strings.pref_category_bubble_zoom),
             preferenceItems = persistentListOf(
                 Preference.PreferenceItem.SwitchPreference(
                     preference = bubbleZoomPref,
-                    title = stringResource(KMR.strings.pref_bubble_zoom_long_tap),
-                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_long_tap_summary),
+                    title = stringResource(KMR.strings.pref_bubble_zoom_enable),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_enable_summary),
                     enabled = bubbleZoomSupported,
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = enginePref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_engine),
+                    entries = persistentMapOf(
+                        "seg" to stringResource(KMR.strings.bubble_zoom_engine_seg),
+                        "ogkalu" to stringResource(KMR.strings.bubble_zoom_engine_ogkalu),
+                    ),
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                    onValueChanged = {
+                        BubbleDetection.onEngineChanged()
+                        true
+                    },
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = inPlaceGesturePref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_in_place_gesture),
+                    entries = gestureEntries,
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                ),
+                Preference.PreferenceItem.ListPreference(
+                    preference = floatingGesturePref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_floating_gesture),
+                    entries = gestureEntries,
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = floatingBackdropPref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop_summary),
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
                 ),
             ),
         )

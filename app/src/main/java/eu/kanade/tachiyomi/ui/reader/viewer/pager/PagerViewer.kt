@@ -16,6 +16,7 @@ import androidx.viewpager.widget.ViewPager
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
+import eu.kanade.tachiyomi.ui.reader.bubble.Bubble
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
 import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
@@ -25,6 +26,8 @@ import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderItem
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
+import eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView
+import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation.NavigationRegion
 import kotlinx.coroutines.MainScope
@@ -146,13 +149,34 @@ abstract class PagerViewer(
                 val firstPage = item?.first as? ReaderPage
                 val secondPage = item?.second as? ReaderPage
                 if (firstPage is ReaderPage) {
-                    // KMK --> Bubble Zoom (phase 1: mock bubbles)
-                    if (config.bubbleZoomEnabled && tryEnterBubbleZoom(firstPage, ev.x, ev.y)) {
-                        return@f true
+                    // KMK --> Bubble Zoom
+                    if (config.bubbleZoomEnabled) {
+                        if (config.bubbleZoomInPlaceGesture == "long_tap" && tryEnterBubbleZoom(firstPage, ev.x, ev.y, BubbleZoomOverlayView.ZoomStyle.IN_PLACE)) {
+                            return@f true
+                        }
+                        if (config.bubbleZoomFloatingGesture == "long_tap" && tryEnterBubbleZoom(firstPage, ev.x, ev.y, BubbleZoomOverlayView.ZoomStyle.FLOATING)) {
+                            return@f true
+                        }
                     }
                     // KMK <--
                     activity.onPageLongTap(firstPage, secondPage)
                     return@f true
+                }
+            }
+            false
+        }
+
+        pager.doubleTapListener = f@{ ev ->
+            if (config.bubbleZoomEnabled) {
+                val item = adapter.joinedItems.getOrNull(pager.currentItem)
+                val firstPage = item?.first as? ReaderPage
+                if (firstPage is ReaderPage) {
+                    if (config.bubbleZoomFloatingGesture == "double_tap" && tryEnterBubbleZoom(firstPage, ev.x, ev.y, BubbleZoomOverlayView.ZoomStyle.FLOATING)) {
+                        return@f true
+                    }
+                    if (config.bubbleZoomInPlaceGesture == "double_tap" && tryEnterBubbleZoom(firstPage, ev.x, ev.y, BubbleZoomOverlayView.ZoomStyle.IN_PLACE)) {
+                        return@f true
+                    }
                 }
             }
             false
@@ -214,32 +238,45 @@ abstract class PagerViewer(
         get() = if (this is R2LPagerViewer) ReadingDirection.RTL else ReadingDirection.LTR
 
     /** Cached bubbles for [page], ordered and scaled to source-image px; null if not ready. */
-    private fun bubbleRectsPx(page: ReaderPage, size: Size): List<RectF>? {
+    private fun bubbleDetections(page: ReaderPage, size: Size): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
         return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection).map {
-            RectF(
-                it.rect.left * size.width,
-                it.rect.top * size.height,
-                it.rect.right * size.width,
-                it.rect.bottom * size.height,
+            Bubble(
+                rect = RectF(
+                    it.rect.left * size.width,
+                    it.rect.top * size.height,
+                    it.rect.right * size.width,
+                    it.rect.bottom * size.height,
+                ),
+                confidence = it.confidence,
+                maskBitmap = it.maskBitmap,
             )
         }
     }
 
     /**
-     * If the long-tap at ([viewX], [viewY]) lands inside a detected bubble on [page], enter Bubble
-     * Zoom and return true; otherwise return false so the caller falls back to the page menu.
-     * Uses whatever detection result is already cached for the page (see [PagerPageHolder]); if
-     * detection hasn't finished yet, this is a no-op and the menu opens as usual.
+     * If the touch gesture at ([viewX], [viewY]) lands inside a detected bubble on [page], enter Bubble
+     * Zoom with [style] and return true; otherwise return false.
      */
-    private fun tryEnterBubbleZoom(page: ReaderPage, viewX: Float, viewY: Float): Boolean {
+    private fun tryEnterBubbleZoom(
+        page: ReaderPage,
+        viewX: Float,
+        viewY: Float,
+        style: BubbleZoomOverlayView.ZoomStyle,
+    ): Boolean {
         val holder = getPageHolder(page) ?: return false
         val size = holder.sourceImageSize() ?: return false
         val src = holder.viewToSourceCoord(viewX, viewY) ?: return false
-        val pxRects = bubbleRectsPx(page, size) ?: return false
-        val hit = pxRects.indexOfFirst { it.contains(src.x, src.y) }
+        val bubbles = bubbleDetections(page, size) ?: return false
+        val hit = bubbles.indexOfFirst { it.rect.contains(src.x, src.y) }
         if (hit < 0) return false
-        activity.enterBubbleZoom(holder, pxRects, hit)
+        activity.enterBubbleZoom(
+            target = holder,
+            page = page,
+            bubbles = bubbles,
+            startIndex = hit,
+            style = style,
+        )
         return true
     }
 
@@ -264,10 +301,10 @@ abstract class PagerViewer(
                 if (now != null && now != before) {
                     val holder = getPageHolder(now)
                     val size = holder?.sourceImageSize()
-                    val pxRects = if (size != null) bubbleRectsPx(now, size) else null
-                    if (holder != null && pxRects != null) {
+                    val bubbles = if (size != null) bubbleDetections(now, size) else null
+                    if (holder != null && bubbles != null) {
                         pendingBubbleZoomPoll = null
-                        activity.enterBubbleZoom(holder, pxRects, if (forward) 0 else pxRects.lastIndex)
+                        activity.enterBubbleZoom(holder, now, bubbles, if (forward) 0 else bubbles.lastIndex)
                         return
                     }
                 }

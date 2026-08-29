@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.ui.reader.bubble
 
+import android.graphics.Bitmap
 import android.graphics.RectF
 
 /**
@@ -9,4 +10,5 @@ import android.graphics.RectF
 data class Bubble(
     val rect: RectF,
     val confidence: Float,
+    val maskBitmap: Bitmap? = null,
 )

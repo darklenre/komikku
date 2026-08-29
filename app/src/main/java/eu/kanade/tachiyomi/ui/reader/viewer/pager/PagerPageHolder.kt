@@ -186,8 +186,8 @@ class PagerPageHolder(
         // KMK: bitmap for bubble detection, decoded from the FINAL image (post split/merge/rotate/crop)
         var detectionBitmap: Bitmap? = null
         val wantBubbleDetection = viewer.config.bubbleZoomEnabled &&
-            BubbleDetection.cached(bubbleKeyFor(page)) == null &&
-            BubbleDetection.isSupported(context)
+            BubbleDetection.isSupported(context) &&
+            BubbleDetection.cached(bubbleKeyFor(page)) == null
 
         try {
             val (source, isAnimated, background) = withIOContext {
@@ -231,7 +231,7 @@ class PagerPageHolder(
                         landscapeZoom = viewer.config.landscapeZoom,
                         // KMK -->
                         disableZoomIn = viewer.config.disableZoomIn,
-                        doubleTapZoom = viewer.config.doubleTapZoom,
+                        doubleTapZoom = viewer.config.doubleTapZoom && !viewer.config.bubbleZoomUsesDoubleTap,
                         landscapeZoomScaleType = viewer.config.landscapeZoomScaleType,
                         // KMK <--
                     ),
@@ -243,14 +243,12 @@ class PagerPageHolder(
             }
             // KMK --> Bubble Zoom: run detection on the final page image in the background
             detectionBitmap?.let { bitmap ->
-                scope.launchIO {
-                    BubbleDetection.detect(context, bubbleKeyFor(page), bitmap)
-                    bitmap.recycle()
-                }
+                BubbleDetection.enqueue(context, bubbleKeyFor(page), bitmap)
             }
             // KMK <--
         } catch (e: Throwable) {
             detectionBitmap?.recycle()
+            if (e is kotlinx.coroutines.CancellationException) throw e
             logcat(LogPriority.ERROR, e)
             withUIContext {
                 setError(e)

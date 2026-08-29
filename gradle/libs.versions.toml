@@ -55,6 +55,7 @@ subsamplingscaleimageview = "com.github.tachiyomiorg:subsampling-scale-image-vie
 image-decoder = "com.github.tachiyomiorg:image-decoder:41c059e540"
 
 # KMK: on-device speech-bubble detection (Bubble Zoom)
+onnxruntime-android = "com.microsoft.onnxruntime:onnxruntime-android:1.20.0"
 tensorflow-lite = "org.tensorflow:tensorflow-lite:2.16.1"
 tensorflow-lite-gpu = "org.tensorflow:tensorflow-lite-gpu:2.16.1"
 tensorflow-lite-gpu-api = "org.tensorflow:tensorflow-lite-gpu-api:2.16.1"

@@ -17,6 +17,7 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.WebtoonLayoutManager
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
+import eu.kanade.tachiyomi.ui.reader.bubble.Bubble
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
 import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
@@ -25,6 +26,7 @@ import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation.NavigationRegion
@@ -159,15 +161,45 @@ class WebtoonViewer(
                     val position = recycler.getChildAdapterPosition(child)
                     val item = adapter.items.getOrNull(position)
                     if (item is ReaderPage) {
-                        // KMK --> Bubble Zoom (phase 1: mock removed, real detector)
-                        if (config.bubbleZoomEnabled &&
-                            tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top)
-                        ) {
-                            return@f true
+                        // KMK --> Bubble Zoom
+                        if (config.bubbleZoomEnabled) {
+                            if (config.bubbleZoomInPlaceGesture == "long_tap" &&
+                                tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top, BubbleZoomOverlayView.ZoomStyle.IN_PLACE)
+                            ) {
+                                return@f true
+                            }
+                            if (config.bubbleZoomFloatingGesture == "long_tap" &&
+                                tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top, BubbleZoomOverlayView.ZoomStyle.FLOATING)
+                            ) {
+                                return@f true
+                            }
                         }
                         // KMK <--
                         activity.onPageLongTap(item)
                         return@f true
+                    }
+                }
+            }
+            false
+        }
+
+        recycler.doubleTapListener = f@{ event ->
+            if (config.bubbleZoomEnabled) {
+                val child = recycler.findChildViewUnder(event.x, event.y)
+                if (child != null) {
+                    val position = recycler.getChildAdapterPosition(child)
+                    val item = adapter.items.getOrNull(position)
+                    if (item is ReaderPage) {
+                        if (config.bubbleZoomFloatingGesture == "double_tap" &&
+                            tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top, BubbleZoomOverlayView.ZoomStyle.FLOATING)
+                        ) {
+                            return@f true
+                        }
+                        if (config.bubbleZoomInPlaceGesture == "double_tap" &&
+                            tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top, BubbleZoomOverlayView.ZoomStyle.IN_PLACE)
+                        ) {
+                            return@f true
+                        }
                     }
                 }
             }
@@ -357,34 +389,44 @@ class WebtoonViewer(
     private var pendingBubbleZoomPoll: Runnable? = null
 
     // Cached bubbles for [page], ordered (vertical) and scaled to source-image px; null if not ready.
-    private fun bubblePxRects(page: ReaderPage, image: ReaderPageImageView): List<RectF>? {
+    private fun bubbleDetections(page: ReaderPage, image: ReaderPageImageView): List<Bubble>? {
         val size = image.sourceImageSize() ?: return null
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
         return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL).map {
-            RectF(
-                it.rect.left * size.width,
-                it.rect.top * size.height,
-                it.rect.right * size.width,
-                it.rect.bottom * size.height,
+            Bubble(
+                rect = RectF(
+                    it.rect.left * size.width,
+                    it.rect.top * size.height,
+                    it.rect.right * size.width,
+                    it.rect.bottom * size.height,
+                ),
+                confidence = it.confidence,
+                maskBitmap = it.maskBitmap,
             )
         }
     }
 
-    // If the long-tap lands inside a detected bubble on [page], enter Bubble Zoom on that page's
-    // image view and return true; otherwise false so the caller opens the page menu.
-    // [child] is the page's ReaderPageImageView; (viewX, viewY) are relative to it.
+    // If the touch lands inside a detected bubble on [page], enter Bubble Zoom on that page's
+    // image view with [style] and return true; otherwise false.
     private fun tryEnterBubbleZoom(
         page: ReaderPage,
         child: View,
         viewX: Float,
         viewY: Float,
+        style: BubbleZoomOverlayView.ZoomStyle,
     ): Boolean {
         val image = child as? ReaderPageImageView ?: return false
         val src = image.viewToSourceCoord(viewX, viewY) ?: return false
-        val pxRects = bubblePxRects(page, image) ?: return false
-        val hit = pxRects.indexOfFirst { it.contains(src.x, src.y) }
+        val bubbles = bubbleDetections(page, image) ?: return false
+        val hit = bubbles.indexOfFirst { it.rect.contains(src.x, src.y) }
         if (hit < 0) return false
-        activity.enterBubbleZoom(image, pxRects, hit)
+        activity.enterBubbleZoom(
+            target = image,
+            page = page,
+            bubbles = bubbles,
+            startIndex = hit,
+            style = style,
+        )
         return true
     }
 
@@ -417,11 +459,12 @@ class WebtoonViewer(
                     return
                 }
                 val image = recycler.findViewHolderForAdapterPosition(targetPos)?.itemView as? ReaderPageImageView
-                val pxRects = image?.let { bubblePxRects(targetPage, it) }
-                if (image != null && pxRects != null) {
+                val bubbles = image?.let { bubbleDetections(targetPage, it) }
+                if (image != null && bubbles != null) {
                     pendingBubbleZoomPoll = null
+                    // Keep currentPage in sync with the page we scrolled to before handing off to the overlay.
                     if (currentPage != targetPage) onScrolled(pos = targetPos)
-                    activity.enterBubbleZoom(image, pxRects, if (forward) 0 else pxRects.lastIndex)
+                    activity.enterBubbleZoom(image, targetPage, bubbles, if (forward) 0 else bubbles.lastIndex)
                     return
                 }
                 if (++attempts < 25) {

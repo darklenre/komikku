@@ -202,8 +202,8 @@ class WebtoonPageHolder(
         // KMK: bitmap for detection, decoded from the FINAL image (post rotate/split/crop)
         var detectionBitmap: Bitmap? = null
         val wantBubbleDetection = viewer.config.bubbleZoomEnabled &&
-            BubbleDetection.cached(bubbleKeyFor(currentPage)) == null &&
-            BubbleDetection.isSupported(context)
+            BubbleDetection.isSupported(context) &&
+            BubbleDetection.cached(bubbleKeyFor(currentPage)) == null
 
         try {
             val (source, isAnimated) = withIOContext {
@@ -224,20 +224,20 @@ class WebtoonPageHolder(
                         cropBorders =
                         (viewer.config.imageCropBorders && viewer.isContinuous) ||
                             (viewer.config.continuousCropBorders && !viewer.isContinuous),
+                        // KMK: let Bubble Zoom own the double-tap when it's bound to it
+                        doubleTapZoom = !viewer.config.bubbleZoomUsesDoubleTap,
                     ),
                 )
                 removeErrorLayout()
             }
             // KMK --> Bubble Zoom: run detection on the final page image in the background
             detectionBitmap?.let { bitmap ->
-                scope.launchIO {
-                    BubbleDetection.detect(context, bubbleKeyFor(currentPage), bitmap)
-                    bitmap.recycle()
-                }
+                BubbleDetection.enqueue(context, bubbleKeyFor(currentPage), bitmap)
             }
             // KMK <--
         } catch (e: Throwable) {
             detectionBitmap?.recycle()
+            if (e is kotlinx.coroutines.CancellationException) throw e
             logcat(LogPriority.ERROR, e)
             withUIContext {
                 setError(e)

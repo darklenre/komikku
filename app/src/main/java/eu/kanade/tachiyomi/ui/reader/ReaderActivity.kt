@@ -1214,8 +1214,10 @@ class ReaderActivity : BaseActivity() {
      */
     fun enterBubbleZoom(
         target: eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView,
-        bubbles: List<RectF>,
+        page: eu.kanade.tachiyomi.ui.reader.model.ReaderPage,
+        bubbles: List<eu.kanade.tachiyomi.ui.reader.bubble.Bubble>,
         startIndex: Int,
+        style: eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView.ZoomStyle = eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView.ZoomStyle.IN_PLACE,
     ) {
         hideMenu()
         val hint = if (!readerPreferences.bubbleZoomHintShown().get()) {
@@ -1226,8 +1228,11 @@ class ReaderActivity : BaseActivity() {
         }
         binding.bubbleZoomOverlay.enter(
             target = target,
+            page = page,
             bubbles = bubbles,
             startIndex = startIndex,
+            style = style,
+            backdrop = readerPreferences.bubbleZoomFloatingBackdrop().get(),
             hint = hint,
             onEdge = { forward ->
                 when (val viewer = viewModel.state.value.viewer) {

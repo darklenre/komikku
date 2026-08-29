@@ -25,3 +25,7 @@
 
 # ML models
 *.onnx binary
+*.tflite binary
+*.pt binary
+*.pth binary
+*.safetensors binary

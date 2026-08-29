@@ -21,6 +21,13 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
 
     // KMK -->
     var bubbleZoomEnabled = false
+    var bubbleZoomInPlaceGesture = "long_tap"
+    var bubbleZoomFloatingGesture = "double_tap"
+
+    /** True when a double-tap is bound to Bubble Zoom, so the page's own double-tap zoom must yield. */
+    val bubbleZoomUsesDoubleTap: Boolean
+        get() = bubbleZoomEnabled &&
+            (bubbleZoomInPlaceGesture == "double_tap" || bubbleZoomFloatingGesture == "double_tap")
     // KMK <--
     var doubleTapAnimDuration = 500
     var volumeKeysEnabled = false
@@ -75,6 +82,10 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
         // KMK -->
         readerPreferences.bubbleZoom()
             .register({ bubbleZoomEnabled = it })
+        readerPreferences.bubbleZoomInPlaceGesture()
+            .register({ bubbleZoomInPlaceGesture = it })
+        readerPreferences.bubbleZoomFloatingGesture()
+            .register({ bubbleZoomFloatingGesture = it })
         // KMK <--
     }
 
