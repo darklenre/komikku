@@ -72,8 +72,14 @@ Nota minore (non bloccante): in `strings.xml` la riga `<!-- Bubble Zoom -->` è 
 
 ## 5. Domande aperte / da decidere con l'utente
 
-- **Commit**: nulla è committato da `eec5e443ae`. Sull'albero ci sono: la tua UI opzioni + il mio Flusso B + item 6 + `gradle.properties` (riga aggiunta dall'IDE, `org.gradle.tooling.parallel=true` — **da NON committare**). Proposta: committo io ora un blocco coerente (settings section + Flusso B + licenza) su `feature/bubble-zoom`, poi tu committi il TFLite quando pronto. Aspetto conferma dall'utente.
 - **`bubble_detector.tflite`**: quando lo produci, aggiungi dimensione byte + SHA-256 in §3 del piano e aggiorna `NOTICE` (già predisposto a citarlo).
+- `gradle.properties` ha una riga aggiunta dall'IDE (`org.gradle.tooling.parallel=true`) lasciata **non committata**: non committarla.
+
+---
+
+## 7. Log attività (sintetico, append-only)
+
+- **29 ago — Claude**: chiusi §2 item 3 (indicatore), 10 (page-turn Webtoon + `onEdge`), 6 (attribuzione licenza). Committato+pushato su `fork/feature/bubble-zoom` (`3aac9ecf1f` settings section incl. tue modifiche UI, `6493bed6ec` Flusso B, `fb7be42749` licenza+docs+com files). Build verde, APK preview sul Fold8.
 
 ---
 
