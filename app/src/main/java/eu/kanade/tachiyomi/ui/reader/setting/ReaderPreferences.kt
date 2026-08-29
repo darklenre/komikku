@@ -148,6 +148,11 @@ class ReaderPreferences(
 
     fun readWithLongTap() = preferenceStore.getBoolean("reader_long_tap", true)
 
+    // KMK -->
+    fun bubbleZoom() = preferenceStore.getBoolean("bubble_zoom", false)
+    fun bubbleZoomHintShown() = preferenceStore.getBoolean("bubble_zoom_hint_shown", false)
+    // KMK <--
+
     fun readWithVolumeKeys() = preferenceStore.getBoolean("reader_volume_keys", false)
 
     fun readWithVolumeKeysInverted() = preferenceStore.getBoolean("reader_volume_keys_inverted", false)

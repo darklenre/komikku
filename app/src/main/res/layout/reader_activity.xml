@@ -28,4 +28,10 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView
+        android:id="@+id/bubble_zoom_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
 </FrameLayout>

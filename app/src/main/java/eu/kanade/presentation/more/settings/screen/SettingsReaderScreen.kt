@@ -4,8 +4,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import eu.kanade.presentation.more.settings.Preference
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderBottomButton
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
@@ -536,6 +538,10 @@ object SettingsReaderScreen : SearchableSettings {
 
     @Composable
     private fun getActionsGroup(readerPreferences: ReaderPreferences): Preference.PreferenceGroup {
+        // KMK -->
+        val context = LocalContext.current
+        val bubbleZoomSupported = remember { BubbleDetection.isSupported(context) }
+        // KMK <--
         return Preference.PreferenceGroup(
             title = stringResource(MR.strings.pref_reader_actions),
             preferenceItems = persistentListOf(
@@ -543,6 +549,14 @@ object SettingsReaderScreen : SearchableSettings {
                     preference = readerPreferences.readWithLongTap(),
                     title = stringResource(MR.strings.pref_read_with_long_tap),
                 ),
+                // KMK -->
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = readerPreferences.bubbleZoom(),
+                    title = stringResource(KMR.strings.pref_bubble_zoom_long_tap),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_long_tap_summary),
+                    enabled = bubbleZoomSupported,
+                ),
+                // KMK <--
                 Preference.PreferenceItem.SwitchPreference(
                     preference = readerPreferences.folderPerManga(),
                     title = stringResource(MR.strings.pref_create_folder_per_manga),

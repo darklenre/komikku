@@ -18,6 +18,10 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
 
     var tappingInverted = ReaderPreferences.TappingInvertMode.NONE
     var longTapEnabled = true
+
+    // KMK -->
+    var bubbleZoomEnabled = false
+    // KMK <--
     var doubleTapAnimDuration = 500
     var volumeKeysEnabled = false
     var volumeKeysInverted = false
@@ -67,6 +71,11 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
 
         readerPreferences.showNavigationOverlayOnStart()
             .register({ navigationOverlayOnStart = it })
+
+        // KMK -->
+        readerPreferences.bubbleZoom()
+            .register({ bubbleZoomEnabled = it })
+        // KMK <--
     }
 
     protected abstract fun defaultNavigation(): ViewerNavigation

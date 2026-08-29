@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.ui.reader.viewer.webtoon
 
 import android.graphics.PointF
+import android.graphics.RectF
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
@@ -16,10 +17,15 @@ import androidx.recyclerview.widget.RecyclerView
 import androidx.recyclerview.widget.WebtoonLayoutManager
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
+import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
+import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
 import eu.kanade.tachiyomi.ui.reader.viewer.Viewer
 import eu.kanade.tachiyomi.ui.reader.viewer.ViewerNavigation.NavigationRegion
 import kotlinx.coroutines.MainScope
@@ -153,6 +159,13 @@ class WebtoonViewer(
                     val position = recycler.getChildAdapterPosition(child)
                     val item = adapter.items.getOrNull(position)
                     if (item is ReaderPage) {
+                        // KMK --> Bubble Zoom (phase 1: mock removed, real detector)
+                        if (config.bubbleZoomEnabled &&
+                            tryEnterBubbleZoom(item, child, event.x - child.left, event.y - child.top)
+                        ) {
+                            return@f true
+                        }
+                        // KMK <--
                         activity.onPageLongTap(item)
                         return@f true
                     }
@@ -336,6 +349,35 @@ class WebtoonViewer(
     /**
      * Scrolls up by [scrollDistance].
      */
+    // KMK --> Bubble Zoom
+    // If the long-tap lands inside a detected bubble on [page], enter Bubble Zoom on that page's
+    // image view and return true; otherwise false so the caller opens the page menu.
+    // [child] is the page's ReaderPageImageView; (viewX, viewY) are relative to it.
+    private fun tryEnterBubbleZoom(
+        page: ReaderPage,
+        child: View,
+        viewX: Float,
+        viewY: Float,
+    ): Boolean {
+        val image = child as? ReaderPageImageView ?: return false
+        val size = image.sourceImageSize() ?: return false
+        val src = image.viewToSourceCoord(viewX, viewY) ?: return false
+        val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return false
+        val pxRects = BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL).map {
+            RectF(
+                it.rect.left * size.width,
+                it.rect.top * size.height,
+                it.rect.right * size.width,
+                it.rect.bottom * size.height,
+            )
+        }
+        val hit = pxRects.indexOfFirst { it.contains(src.x, src.y) }
+        if (hit < 0) return false
+        activity.enterBubbleZoom(image, pxRects, hit)
+        return true
+    }
+    // KMK <--
+
     private fun scrollUp() {
         if (config.usePageTransitions) {
             recycler.smoothScrollBy(0, -scrollDistance)

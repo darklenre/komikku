@@ -13,6 +13,7 @@ import android.graphics.Color
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
+import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -22,6 +23,7 @@ import android.view.View
 import android.view.View.LAYER_TYPE_HARDWARE
 import android.view.WindowManager
 import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -228,6 +230,18 @@ class ReaderActivity : BaseActivity() {
         binding = ReaderActivityBinding.inflate(layoutInflater)
         setContentView(binding.root)
         binding.setComposeOverlay()
+
+        // KMK --> Bubble Zoom: back exits the mode instead of closing the reader
+        onBackPressedDispatcher.addCallback(this) {
+            if (binding.bubbleZoomOverlay.isActive) {
+                binding.bubbleZoomOverlay.exit()
+            } else {
+                isEnabled = false
+                onBackPressedDispatcher.onBackPressed()
+                isEnabled = true
+            }
+        }
+        // KMK <--
 
         if (viewModel.needsInit()) {
             val manga = intent.extras?.getLong("manga", -1) ?: -1L
@@ -959,6 +973,8 @@ class ReaderActivity : BaseActivity() {
 
         // Destroy previous viewer if there was one
         if (prevViewer != null) {
+            // KMK: bail out of Bubble Zoom before the viewer it points at is torn down
+            binding.bubbleZoomOverlay.exit()
             prevViewer.destroy()
             binding.viewerContainer.removeAllViews()
         }
@@ -1174,6 +1190,39 @@ class ReaderActivity : BaseActivity() {
     fun onPageLongTap(page: ReaderPage, /* SY --> */ extraPage: ReaderPage? = null /* SY <-- */) {
         viewModel.openPageDialog(page, /* SY --> */ extraPage /* SY <-- */)
     }
+
+    // KMK --> Bubble Zoom
+    /**
+     * Called from a viewer when a long-tap lands inside a detected bubble. Enters Bubble Zoom mode:
+     * the overlay takes over gestures until a single tap / back press exits.
+     */
+    fun enterBubbleZoom(
+        target: eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView,
+        bubbles: List<RectF>,
+        startIndex: Int,
+    ) {
+        hideMenu()
+        val hint = if (!readerPreferences.bubbleZoomHintShown().get()) {
+            readerPreferences.bubbleZoomHintShown().set(true)
+            stringResource(KMR.strings.bubble_zoom_hint)
+        } else {
+            null
+        }
+        binding.bubbleZoomOverlay.enter(
+            target = target,
+            bubbles = bubbles,
+            startIndex = startIndex,
+            hint = hint,
+            onEdge = { forward ->
+                (viewModel.state.value.viewer as? PagerViewer)?.advanceBubbleZoom(forward) ?: false
+            },
+        )
+    }
+
+    fun exitBubbleZoom() {
+        binding.bubbleZoomOverlay.exit()
+    }
+    // KMK <--
 
     /**
      * Called from the viewer when the given [chapter] should be preloaded. It should be called when

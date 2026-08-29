@@ -3,12 +3,15 @@ package eu.kanade.tachiyomi.ui.reader.viewer.pager
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import androidx.annotation.ColorInt
 import androidx.core.view.isVisible
 import eu.kanade.presentation.util.formattedMessage
 import eu.kanade.tachiyomi.databinding.ReaderErrorBinding
 import eu.kanade.tachiyomi.source.model.Page
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.viewer.ReaderPageImageView
@@ -180,6 +183,12 @@ class PagerPageHolder(
         val streamFn = page.stream ?: return
         val streamFn2 = extraPage?.stream
 
+        // KMK: bitmap for bubble detection, decoded from the FINAL image (post split/merge/rotate/crop)
+        var detectionBitmap: Bitmap? = null
+        val wantBubbleDetection = viewer.config.bubbleZoomEnabled &&
+            BubbleDetection.cached(bubbleKeyFor(page)) == null &&
+            BubbleDetection.isSupported(context)
+
         try {
             val (source, isAnimated, background) = withIOContext {
                 streamFn().buffered(16).use { source ->
@@ -201,6 +210,10 @@ class PagerPageHolder(
                             ImageUtil.chooseBackground(context, itemSource.peek())
                         } else {
                             null
+                        }
+                        // KMK: snapshot the final image bytes for detection before SSIV consumes them
+                        if (!isAnimated && wantBubbleDetection) {
+                            detectionBitmap = decodeForDetection(itemSource.peek())
                         }
                         Triple(itemSource, isAnimated, background)
                     }
@@ -228,13 +241,40 @@ class PagerPageHolder(
                 }
                 removeErrorLayout()
             }
+            // KMK --> Bubble Zoom: run detection on the final page image in the background
+            detectionBitmap?.let { bitmap ->
+                scope.launchIO {
+                    BubbleDetection.detect(context, bubbleKeyFor(page), bitmap)
+                    bitmap.recycle()
+                }
+            }
+            // KMK <--
         } catch (e: Throwable) {
+            detectionBitmap?.recycle()
             logcat(LogPriority.ERROR, e)
             withUIContext {
                 setError(e)
             }
         }
     }
+
+    // KMK --> Bubble Zoom
+    /** Decodes [source] (a peek of the final page image) downscaled to at most [DETECTION_MAX_SIDE]. */
+    private fun decodeForDetection(source: BufferedSource): Bitmap? = try {
+        val bytes = source.readByteArray()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val longSide = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = max(1, longSide / DETECTION_MAX_SIDE)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    } catch (e: Throwable) {
+        logcat(LogPriority.WARN, e) { "Bubble detection decode failed" }
+        null
+    }
+    // KMK <--
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {
         if (viewer.config.dualPageRotateToFit) {
@@ -487,3 +527,6 @@ class PagerPageHolder(
         errorLayout = null
     }
 }
+
+// KMK: longest side (px) the page is downscaled to before running bubble detection
+private const val DETECTION_MAX_SIDE = 1024

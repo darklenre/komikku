@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.ui.reader.viewer.pager
 
 import android.graphics.PointF
+import android.graphics.RectF
+import android.util.Size
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -14,6 +16,10 @@ import androidx.viewpager.widget.ViewPager
 import eu.kanade.tachiyomi.R
 import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
+import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
+import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderItem
@@ -134,12 +140,17 @@ abstract class PagerViewer(
                 NavigationRegion.LEFT -> moveLeft()
             }
         }
-        pager.longTapListener = f@{
+        pager.longTapListener = f@{ ev ->
             if (activity.viewModel.state.value.menuVisible || config.longTapEnabled) {
                 val item = adapter.joinedItems.getOrNull(pager.currentItem)
                 val firstPage = item?.first as? ReaderPage
                 val secondPage = item?.second as? ReaderPage
                 if (firstPage is ReaderPage) {
+                    // KMK --> Bubble Zoom (phase 1: mock bubbles)
+                    if (config.bubbleZoomEnabled && tryEnterBubbleZoom(firstPage, ev.x, ev.y)) {
+                        return@f true
+                    }
+                    // KMK <--
                     activity.onPageLongTap(firstPage, secondPage)
                     return@f true
                 }
@@ -170,6 +181,10 @@ abstract class PagerViewer(
     override fun destroy() {
         super.destroy()
         scope.cancel()
+        // KMK --> Bubble Zoom: drop any pending page-turn poll so it can't fire on a dead activity
+        pendingBubbleZoomPoll?.let { pager.removeCallbacks(it) }
+        pendingBubbleZoomPoll = null
+        // KMK <--
     }
 
     /**
@@ -191,6 +206,85 @@ abstract class PagerViewer(
         pager.children
             .filterIsInstance<PagerPageHolder>()
             .firstOrNull { it.item.first == page || it.item.second == page }
+
+    // KMK --> Bubble Zoom
+    private var pendingBubbleZoomPoll: Runnable? = null
+
+    private val bubbleReadingDirection
+        get() = if (this is R2LPagerViewer) ReadingDirection.RTL else ReadingDirection.LTR
+
+    /** Cached bubbles for [page], ordered and scaled to source-image px; null if not ready. */
+    private fun bubbleRectsPx(page: ReaderPage, size: Size): List<RectF>? {
+        val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
+        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection).map {
+            RectF(
+                it.rect.left * size.width,
+                it.rect.top * size.height,
+                it.rect.right * size.width,
+                it.rect.bottom * size.height,
+            )
+        }
+    }
+
+    /**
+     * If the long-tap at ([viewX], [viewY]) lands inside a detected bubble on [page], enter Bubble
+     * Zoom and return true; otherwise return false so the caller falls back to the page menu.
+     * Uses whatever detection result is already cached for the page (see [PagerPageHolder]); if
+     * detection hasn't finished yet, this is a no-op and the menu opens as usual.
+     */
+    private fun tryEnterBubbleZoom(page: ReaderPage, viewX: Float, viewY: Float): Boolean {
+        val holder = getPageHolder(page) ?: return false
+        val size = holder.sourceImageSize() ?: return false
+        val src = holder.viewToSourceCoord(viewX, viewY) ?: return false
+        val pxRects = bubbleRectsPx(page, size) ?: return false
+        val hit = pxRects.indexOfFirst { it.contains(src.x, src.y) }
+        if (hit < 0) return false
+        activity.enterBubbleZoom(holder, pxRects, hit)
+        return true
+    }
+
+    /**
+     * Called from the overlay when the user swipes past the first / last bubble. Turns the page and,
+     * once the new page's holder + detection are ready, re-enters Bubble Zoom on its first ([forward])
+     * or last bubble. Returns true if a page turn was initiated.
+     */
+    fun advanceBubbleZoom(forward: Boolean): Boolean {
+        val before = currentPage as? ReaderPage ?: return false
+        if (forward) moveToNext() else moveToPrevious()
+
+        pendingBubbleZoomPoll?.let { pager.removeCallbacks(it) }
+        val poll = object : Runnable {
+            var attempts = 0
+            override fun run() {
+                if (activity.isFinishing || activity.isDestroyed) {
+                    pendingBubbleZoomPoll = null
+                    return
+                }
+                val now = currentPage as? ReaderPage
+                if (now != null && now != before) {
+                    val holder = getPageHolder(now)
+                    val size = holder?.sourceImageSize()
+                    val pxRects = if (size != null) bubbleRectsPx(now, size) else null
+                    if (holder != null && pxRects != null) {
+                        pendingBubbleZoomPoll = null
+                        activity.enterBubbleZoom(holder, pxRects, if (forward) 0 else pxRects.lastIndex)
+                        return
+                    }
+                }
+                if (++attempts < 25) {
+                    pager.postDelayed(this, 100)
+                } else {
+                    // Gave up (chapter edge, or detection too slow): leave the new page visible.
+                    pendingBubbleZoomPoll = null
+                    activity.exitBubbleZoom()
+                }
+            }
+        }
+        pendingBubbleZoomPoll = poll
+        pager.postDelayed(poll, 120)
+        return true
+    }
+    // KMK <--
 
     /**
      * Called when a new page (either a [ReaderPage] or [ChapterTransition]) is marked as active

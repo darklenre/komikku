@@ -147,6 +147,12 @@ android {
         includeInBundle = Config.includeDependencyInfo
     }
 
+    // KMK: keep the ONNX bubble-detection model uncompressed so it can be mmap'd from assets
+    androidResources {
+        @Suppress("UnstableApiUsage")
+        noCompress += "onnx"
+    }
+
     buildFeatures {
         viewBinding = true
         buildConfig = true
@@ -297,6 +303,7 @@ dependencies {
 
     // KMK -->
     implementation(libs.palette.ktx)
+    implementation(libs.onnxruntime.android) // Bubble Zoom: on-device speech-bubble detection
     implementation(libs.haze)
     implementation(compose.colorpicker)
     implementation(projects.flagkit)
