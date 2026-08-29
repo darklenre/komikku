@@ -266,6 +266,10 @@ class WebtoonViewer(
     override fun destroy() {
         super.destroy()
         scope.cancel()
+        // KMK --> Bubble Zoom: drop any pending page-turn poll so it can't fire on a dead activity
+        pendingBubbleZoomPoll?.let { recycler.removeCallbacks(it) }
+        pendingBubbleZoomPoll = null
+        // KMK <--
     }
 
     /**
@@ -350,6 +354,22 @@ class WebtoonViewer(
      * Scrolls up by [scrollDistance].
      */
     // KMK --> Bubble Zoom
+    private var pendingBubbleZoomPoll: Runnable? = null
+
+    // Cached bubbles for [page], ordered (vertical) and scaled to source-image px; null if not ready.
+    private fun bubblePxRects(page: ReaderPage, image: ReaderPageImageView): List<RectF>? {
+        val size = image.sourceImageSize() ?: return null
+        val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
+        return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL).map {
+            RectF(
+                it.rect.left * size.width,
+                it.rect.top * size.height,
+                it.rect.right * size.width,
+                it.rect.bottom * size.height,
+            )
+        }
+    }
+
     // If the long-tap lands inside a detected bubble on [page], enter Bubble Zoom on that page's
     // image view and return true; otherwise false so the caller opens the page menu.
     // [child] is the page's ReaderPageImageView; (viewX, viewY) are relative to it.
@@ -360,20 +380,61 @@ class WebtoonViewer(
         viewY: Float,
     ): Boolean {
         val image = child as? ReaderPageImageView ?: return false
-        val size = image.sourceImageSize() ?: return false
         val src = image.viewToSourceCoord(viewX, viewY) ?: return false
-        val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return false
-        val pxRects = BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL).map {
-            RectF(
-                it.rect.left * size.width,
-                it.rect.top * size.height,
-                it.rect.right * size.width,
-                it.rect.bottom * size.height,
-            )
-        }
+        val pxRects = bubblePxRects(page, image) ?: return false
         val hit = pxRects.indexOfFirst { it.contains(src.x, src.y) }
         if (hit < 0) return false
         activity.enterBubbleZoom(image, pxRects, hit)
+        return true
+    }
+
+    // Called from the overlay when the user swipes past the first / last bubble of the page. Scrolls
+    // to the next ([forward]) / previous ReaderPage and, once its holder + detection are ready,
+    // re-enters Bubble Zoom on its first / last bubble. Returns true if a page turn was started.
+    fun advanceBubbleZoom(forward: Boolean): Boolean {
+        val current = currentPage as? ReaderPage ?: return false
+        val curPos = adapter.items.indexOf(current)
+        if (curPos < 0) return false
+        val targetPos = if (forward) {
+            (curPos + 1 until adapter.items.size).firstOrNull { adapter.items[it] is ReaderPage }
+        } else {
+            (curPos - 1 downTo 0).firstOrNull { adapter.items[it] is ReaderPage }
+        } ?: return false
+        val targetPage = adapter.items[targetPos] as ReaderPage
+
+        if (config.usePageTransitions) {
+            recycler.smoothScrollToPosition(targetPos)
+        } else {
+            layoutManager.scrollToPositionWithOffset(targetPos, 0)
+        }
+
+        pendingBubbleZoomPoll?.let { recycler.removeCallbacks(it) }
+        val poll = object : Runnable {
+            var attempts = 0
+            override fun run() {
+                if (activity.isFinishing || activity.isDestroyed) {
+                    pendingBubbleZoomPoll = null
+                    return
+                }
+                val image = recycler.findViewHolderForAdapterPosition(targetPos)?.itemView as? ReaderPageImageView
+                val pxRects = image?.let { bubblePxRects(targetPage, it) }
+                if (image != null && pxRects != null) {
+                    pendingBubbleZoomPoll = null
+                    if (currentPage != targetPage) onScrolled(pos = targetPos)
+                    activity.enterBubbleZoom(image, pxRects, if (forward) 0 else pxRects.lastIndex)
+                    return
+                }
+                if (++attempts < 25) {
+                    recycler.postDelayed(this, 100)
+                } else {
+                    // Gave up (chapter edge, or detection too slow): leave the new page visible.
+                    pendingBubbleZoomPoll = null
+                    activity.exitBubbleZoom()
+                }
+            }
+        }
+        pendingBubbleZoomPoll = poll
+        recycler.postDelayed(poll, 120)
         return true
     }
     // KMK <--

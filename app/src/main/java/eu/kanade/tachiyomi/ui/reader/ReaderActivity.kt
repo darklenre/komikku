@@ -32,9 +32,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -93,6 +96,7 @@ import eu.kanade.tachiyomi.ui.main.MainActivity
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel.SetAsCoverResult.AddToLibraryFirst
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel.SetAsCoverResult.Error
 import eu.kanade.tachiyomi.ui.reader.ReaderViewModel.SetAsCoverResult.Success
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
 import eu.kanade.tachiyomi.ui.reader.loader.HttpPageLoader
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
@@ -364,6 +368,18 @@ class ReaderActivity : BaseActivity() {
                 ContentOverlay(state = state)
 
                 AppBars(state = state)
+
+                // KMK --> Bubble Zoom: thin indeterminate bar while a page's bubble detection runs
+                val bubbleDetections by BubbleDetection.activeDetections.collectAsState()
+                if (bubbleDetections > 0) {
+                    LinearProgressIndicator(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .fillMaxWidth()
+                            .statusBarsPadding(),
+                    )
+                }
+                // KMK <--
             }
 
             // KMK -->
@@ -1214,7 +1230,11 @@ class ReaderActivity : BaseActivity() {
             startIndex = startIndex,
             hint = hint,
             onEdge = { forward ->
-                (viewModel.state.value.viewer as? PagerViewer)?.advanceBubbleZoom(forward) ?: false
+                when (val viewer = viewModel.state.value.viewer) {
+                    is PagerViewer -> viewer.advanceBubbleZoom(forward)
+                    is WebtoonViewer -> viewer.advanceBubbleZoom(forward)
+                    else -> false
+                }
             },
         )
     }
