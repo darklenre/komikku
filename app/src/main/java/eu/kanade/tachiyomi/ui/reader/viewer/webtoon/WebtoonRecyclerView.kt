@@ -55,6 +55,7 @@ class WebtoonRecyclerView @JvmOverloads constructor(
 
     var tapListener: ((MotionEvent) -> Unit)? = null
     var longTapListener: ((MotionEvent) -> Boolean)? = null
+    var doubleTapListener: ((MotionEvent) -> Boolean)? = null
 
     private var isManuallyScrolling = false
     private var tapDuringManualScroll = false
@@ -249,6 +250,9 @@ class WebtoonRecyclerView @JvmOverloads constructor(
         }
 
         override fun onDoubleTap(ev: MotionEvent): Boolean {
+            if (doubleTapListener?.invoke(ev) == true) {
+                return true
+            }
             detector.isDoubleTapping = true
             return false
         }

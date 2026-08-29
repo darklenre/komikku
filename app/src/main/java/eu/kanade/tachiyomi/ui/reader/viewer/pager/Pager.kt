@@ -27,6 +27,7 @@ open class Pager(
      * Long tap listener function to execute when a long tap is detected.
      */
     var longTapListener: ((MotionEvent) -> Boolean)? = null
+    var doubleTapListener: ((MotionEvent) -> Boolean)? = null
 
     // SY -->
     var isRestoring = false
@@ -47,6 +48,10 @@ open class Pager(
         override fun onSingleTapConfirmed(ev: MotionEvent): Boolean {
             tapListener?.invoke(ev)
             return true
+        }
+
+        override fun onDoubleTap(ev: MotionEvent): Boolean {
+            return doubleTapListener?.invoke(ev) ?: false
         }
 
         override fun onLongTapConfirmed(ev: MotionEvent) {

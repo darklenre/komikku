@@ -151,6 +151,10 @@ class ReaderPreferences(
     // KMK -->
     fun bubbleZoom() = preferenceStore.getBoolean("bubble_zoom", false)
     fun bubbleZoomHintShown() = preferenceStore.getBoolean("bubble_zoom_hint_shown", false)
+    fun bubbleZoomEngine() = preferenceStore.getString("bubble_zoom_engine", "seg")
+    fun bubbleZoomInPlaceGesture() = preferenceStore.getString("bubble_zoom_in_place_gesture", "long_tap")
+    fun bubbleZoomFloatingGesture() = preferenceStore.getString("bubble_zoom_floating_gesture", "double_tap")
+    fun bubbleZoomFloatingBackdrop() = preferenceStore.getBoolean("bubble_zoom_floating_backdrop", true)
     // KMK <--
 
     fun readWithVolumeKeys() = preferenceStore.getBoolean("reader_volume_keys", false)

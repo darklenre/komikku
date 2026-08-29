@@ -310,7 +310,8 @@ dependencies {
 
     // KMK -->
     implementation(libs.palette.ktx)
-    implementation(libs.tensorflow.lite) // Bubble Zoom: on-device speech-bubble detection (TFLite)
+    implementation(libs.onnxruntime.android) // Bubble Zoom: ONNX Runtime
+    implementation(libs.tensorflow.lite) // Bubble Zoom: TensorFlow Lite
     implementation(libs.tensorflow.lite.gpu)
     implementation(libs.tensorflow.lite.gpu.api)
     implementation(libs.haze)

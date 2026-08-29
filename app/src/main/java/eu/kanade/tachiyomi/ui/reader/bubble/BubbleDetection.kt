@@ -6,10 +6,17 @@ import android.graphics.Bitmap
 import android.os.Process
 import android.util.LruCache
 import androidx.core.content.getSystemService
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -26,7 +33,15 @@ object BubbleDetection {
      */
     private const val MIN_TOTAL_RAM_BYTES = 2L * 1024 * 1024 * 1024
 
-    private val cache = LruCache<String, List<Bubble>>(CACHE_SIZE)
+    private val cache = object : LruCache<String, List<Bubble>>(CACHE_SIZE) {
+        // Bubbles from the segmentation engine carry an ARGB mask Bitmap; recycle it when the page
+        // drops out of the cache so masks don't pile up until GC (evictAll / eviction / remove).
+        override fun entryRemoved(evicted: Boolean, key: String, oldValue: List<Bubble>, newValue: List<Bubble>?) {
+            if (newValue == null) {
+                oldValue.forEach { it.maskBitmap?.recycle() }
+            }
+        }
+    }
 
     @Volatile
     private var detector: BubbleDetector? = null
@@ -47,6 +62,22 @@ object BubbleDetection {
 
     fun cached(key: String): List<Bubble>? = cache.get(key)
 
+    private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Enqueues a background detection for [bitmap] without blocking or binding to ephemeral page holder lifecycles.
+     * [bitmap] is automatically recycled upon completion.
+     */
+    fun enqueue(context: Context, key: String, bitmap: Bitmap) {
+        detectionScope.launch {
+            try {
+                detect(context.applicationContext, key, bitmap)
+            } finally {
+                bitmap.recycle()
+            }
+        }
+    }
+
     /** Detects bubbles on [bitmap] (the final page image), caching under [key]. */
     suspend fun detect(context: Context, key: String, bitmap: Bitmap): List<Bubble> {
         cache.get(key)?.let { return it }
@@ -63,12 +94,31 @@ object BubbleDetection {
         }
     }
 
+    fun onEngineChanged() {
+        synchronized(this) {
+            (detector as? OnnxBubbleDetector)?.close()
+            (detector as? TfliteBubbleDetector)?.close()
+            detector = null
+            cache.evictAll()
+        }
+    }
+
     private fun detectorFor(appContext: Context): BubbleDetector {
         detector?.let { return it }
         return synchronized(this) {
-            detector ?: (
-                if (isSupported(appContext)) TfliteBubbleDetector(appContext) else NoopBubbleDetector
-                ).also { detector = it }
+            detector ?: run {
+                if (!isSupported(appContext)) return@synchronized NoopBubbleDetector
+                val engine = try {
+                    Injekt.get<ReaderPreferences>().bubbleZoomEngine().get()
+                } catch (t: Throwable) {
+                    "seg"
+                }
+                if (engine == "ogkalu") {
+                    OnnxBubbleDetector(appContext)
+                } else {
+                    TfliteBubbleDetector(appContext)
+                }
+            }.also { detector = it }
         }
     }
 }

@@ -1,6 +1,8 @@
 package eu.kanade.tachiyomi.ui.reader.viewer
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.PointF
 import android.graphics.RectF
 import android.graphics.drawable.Animatable
@@ -277,6 +279,36 @@ open class ReaderPageImageView @JvmOverloads constructor(
     fun viewToSourceCoord(viewX: Float, viewY: Float): PointF? =
         ssivIfReady?.viewToSourceCoord(viewX, viewY)
 
+    /** Render and crop a high-resolution sub-region of the page in source coordinates. */
+    fun cropSourceRect(srcRect: RectF): Bitmap? {
+        val view = pageView ?: return null
+        val ssiv = ssivIfReady
+        if (ssiv != null) {
+            val p1 = ssiv.sourceToViewCoord(srcRect.left, srcRect.top) ?: return null
+            val p2 = ssiv.sourceToViewCoord(srcRect.right, srcRect.bottom) ?: return null
+            val viewRect = RectF(
+                minOf(p1.x, p2.x),
+                minOf(p1.y, p2.y),
+                maxOf(p1.x, p2.x),
+                maxOf(p1.y, p2.y),
+            )
+            val w = viewRect.width().toInt().coerceIn(1, 4096)
+            val h = viewRect.height().toInt().coerceIn(1, 4096)
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            canvas.translate(-viewRect.left, -viewRect.top)
+            view.draw(canvas)
+            return bmp
+        } else {
+            val w = view.width.coerceIn(1, 4096)
+            val h = view.height.coerceIn(1, 4096)
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bmp)
+            view.draw(canvas)
+            return bmp
+        }
+    }
+
     /**
      * Animate so [rect] (source-image px) fills the viewport with a small margin, centered.
      * No-op unless a ready [SubsamplingScaleImageView] backs this view (e.g. animated pages).
@@ -301,6 +333,15 @@ open class ReaderPageImageView @JvmOverloads constructor(
         } else {
             view.setScaleAndCenter(target, center)
         }
+    }
+
+    /**
+     * Enable/disable the built-in pinch + double-tap zoom gestures. Bubble Zoom turns them off while
+     * its overlay is active so the triggering double-tap can't also start the page's own 2x zoom.
+     * Programmatic [focusOnRect] / [resetZoom] still work.
+     */
+    fun setGestureZoomEnabled(enabled: Boolean) {
+        (pageView as? SubsamplingScaleImageView)?.isZoomEnabled = enabled
     }
 
     /** Restore the page to its fit-to-screen scale and center. */
