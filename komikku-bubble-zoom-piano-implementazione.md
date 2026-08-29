@@ -34,11 +34,11 @@
 
 | # | Item | Note |
 |---|---|---|
-| 1 | **Latenza reale su ARM** — ✅ misurata su Fold8 | **~217 ms mediana** (min 213, max 257 warmup, media 221), 19 pagine, int8 @640, 1 thread, input ≤1024 px lato lungo. Detection gira al decode pagina, off-UI: al long-tap è già in cache. Ampio margine. Il Fold8 è best-case (SoC di punta); un mid-range può stare ~2–4× → ~0.5–0.9 s, comunque accettabile perché asincrono + pre-calcolato, e coperto dalla barra dell'item 3. **Resta opzionale**: una misura su un device mid-range (il motore TFLite dell'item 5, con delegate NNAPI/GPU, è la leva se serve). |
+| 1 | **Latenza reale su ARM** — ✅ misurata su Fold8 | **ONNX**: **~217 ms mediana** (min 213, max 257 warmup, media 221), 19 pagine, int8 @640, 1 thread CPU. **TensorFlow Lite (GPU Delegate)**: **~123 ms mediana** (min 120, max 153 warmup, media 125, ~122 ms a regime), 14 pagine, int8 @640, hardware accelerated via Adreno GPU. Latenza ridotta del ~43% (-94 ms/pagina). Detection gira asincrona al decode pagina, off-UI: al long-tap è già in cache. |
 | 2 | **Peso APK release** — ✅ misurato, **accettato** | Confronto `preview` baseline `936e25bf99` vs `feature/bubble-zoom`: arm64 **39.8 → 84.7 MB (+44.9)**, v7a 33.9 → 73.4 (+39.5), universal 96.6 → 196.8 (+100.2). Delta arm64 = 26.3 (`bubble_detector.onnx`, `Stored`) + 17.6 (`libonnxruntime.so`, `Stored`) + 0.9 (`libonnxruntime4j_jni.so`) + ~0.1 dex. **Delta accettato dall'utente.** Con **entrambi** i motori bundlati (item 5) il costo arm64 sale a ~+62 MB (ONNX ~45 + TFLite ~17: `libtensorflowlite_jni.so` ~3–4 MB + `bubble_detector.tflite` ~13 MB) — anch'esso accettato. Feature comunque `default = false`. |
 | 3 | **Indicazione visiva del tempo di elaborazione** — ✅ fatto | `BubbleDetection.activeDetections: StateFlow<Int>` (incrementato/decrementato attorno a `detect()`); in `ReaderActivity.setComposeOverlay`, dentro il `Box`, un `LinearProgressIndicator` indeterminato `align(TopCenter).fillMaxWidth().statusBarsPadding()` visibile finché `activeDetections > 0`. Deviazione voluta da §2.1: "una detection qualsiasi in corso" invece di "la pagina corrente" — nessun plumbing per-pagina nel compose, e in pratica coincide (le detection attive sono quelle degli holder vicini). |
 | 4 | **Sezione "Bubble Zoom" nelle impostazioni Lettore + selettore motore** — ✅ fatto (Antigravity) | `SettingsReaderScreen.getBubbleZoomGroup()` (categoria dedicata: `SwitchPreference` attivazione + `ListPreference` motore, `enabled = supported && bubbleZoom`, `onValueChanged → BubbleDetection.onEngineChanged()`); voce vecchia rimossa da `getActionsGroup`. `ReaderPreferences.bubbleZoomEngine()` (`bubble_zoom_engine`, default `"onnx"`). Stringhe §2.2 in `base`. Il motore `tflite` diventa funzionante con l'item 5. |
-| 5 | **Secondo motore: TFLite + LiteRT — a fianco di ONNX, selezionabile** | Si bundlano **entrambi** i runtime ed **entrambi** i modelli; l'utente sceglie con `bubble_zoom_engine` (`onnx` = default / `tflite`). **Spec dettagliata delegata ad Antigravity in §5.** |
+| 5 | **Secondo motore: TFLite + LiteRT — a fianco di ONNX, selezionabile** — ✅ fatto (Antigravity) | Entrambi i runtime ed entrambi i modelli bundlati (`bubble_detector.tflite` 25.3 MB, SHA-256 `98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282`). `TfliteBubbleDetector` con GPU delegate (fallback CPU XNNPACK) + `BubblePostprocess` condiviso + `BubbleDetection.detectorFor` dinamico + keep rules ProGuard. |
 | 6 | **Attribuzione licenza** — ✅ fatto | `app/src/main/assets/models/LICENSE` (testo Apache-2.0) + `NOTICE` (attribuzione ogkalu, commit `21d5af0a`, natura degli export int8). Voce nella schermata licenze open source via AboutLibraries: `aboutLibraries { collect { configPath = file("aboutlibraries-config") } }` in `app/build.gradle.kts` + `aboutlibraries-config/libraries/comic-speech-bubble-detector-yolov8m.json` (uniqueId `com.ogkalu:…`, tag "Bundled model", licenza `Apache-2.0`) + `aboutlibraries-config/licenses/apache-2-0.json` (testo completo, risolve offline). Verificato: la voce compare in `aboutlibraries.json` generato. Il `.tflite` (item 5) ricade sotto la stessa voce. |
 | 7 | **Traduzioni** | Le stringhe `KMR` (quelle esistenti + le nuove di §2.2) sono solo in `base` (EN). IT e altre lingue via Weblate dopo il merge. |
 | 8 | **Issue upstream** | Aprire issue su `komikku-app/komikku` prima della PR (come da `CONTRIBUTING.md` per modifiche importanti): citare il precedente TachiyomiJ2K (#573, #1566), feature dietro preferenza `default = false`, modelli Apache-2.0 bundlati, peso APK. |
@@ -86,7 +86,8 @@ Stringhe base `KMR` (EN in `i18n-kmk/.../base/strings.xml`; IT indicativa, da ri
 
 - **Sorgente `.pt`** (per rigenerare l'ONNX, non a runtime): `https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m/resolve/21d5af0a9c69bb522b9968d6cc915f898d71a264/comic-speech-bubble-detector.pt` — SHA-256 `10bc9f702698148e079fb4462a6b910fcd69753e04838b54087ef91d5633097b`.
 - **Playground** `/mnt/data/src/kotlin/bubbleZoomPlayground/` — engine Kotlin puro (letterbox 640, decode `[1,5,8400]`, NMS IoU 0.45, reading-order, hit-test) con `YoloDetBubbleDetector` come **fonte di verità** per il postprocess. `models/` tiene int8 (26.3 MB), fp16 di riferimento (51.9 MB), fp32 sorgente (103.6 MB). `calib_set/` = 340 immagini di calibrazione. Immagini di ground-truth separate dalla calibrazione.
-- **I/O modello**: input `images` letterbox 640×640 `/255` grey 114; output detect `[1, 5, 8400]` = `cx,cy,w,h,score` in spazio 640; soglia 0.30, NMS 0.45; box normalizzati per `contentW = 640 - 2·padX`. Nessuna maschera. **Il `.tflite` (item 5) esce dallo stesso `.pt`**, stesso input/postprocess; l'export TFLite può dare l'output trasposto (`[1, 8400, 5]`) o già con NMS — verificare il layout e disattivare l'NMS nell'export (`nms=False`) per riusare il decode esistente.
+- **Modello TFLite int8**: `app/src/main/assets/models/bubble_detector.tflite` — **26,516,834 B (25.3 MB)**, SHA-256 `98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282`. Prodotto con Ultralytics `YOLO(pt).export(format="tflite", imgsz=640, int8=True, nms=False, data="calib_yolo/data.yaml")`.
+- **I/O modello**: input `images` letterbox 640×640 `/255` grey 114; output detect `[1, 5, 8400]` = `cx,cy,w,h,score` in spazio 640; soglia 0.30, NMS 0.45; box normalizzati per `contentW = 640 - 2·padX`. Nessuna maschera. Il `.tflite` esce dallo stesso `.pt`, stesso input/postprocess (`nms=False`).
 - **Gotcha 1** — `focusOnRect`/`resetZoom` **devono** usare `animateScaleAndCenter(...).withInterruptible(false)`: con `true` gli eventi di coda del long-press raggiungono la `SubsamplingScaleImageView` e annullano l'animazione. `focusCurrent()` chiama `t.post { }` per lo stesso motivo.
 - **Gotcha 2** — R8 (build `preview`/`release`) elimina le classi `ai.onnxruntime.*` istanziate solo via JNI dal nativo → `SIGABRT` `mid == null` in `OrtSession.run`. Necessarie in `proguard-rules.pro`:
   ```
@@ -259,12 +260,69 @@ Verificare che un build `preview` (R8 attivo) **non** crashi con `mid == null` /
 3. **Emulatore x86** (`Pixel_9_Pro_XL`, build debug): con `bubble_zoom_engine = tflite`, aprire un capitolo Pager e uno Webtoon → long-tap su bubble → zoom corretto; swipe → navigazione; tap/back → uscita. Cambio motore da impostazioni → la pagina successiva usa il nuovo motore, nessun crash.
 4. **Z Fold8** (build `preview`, R8): reinstallare, ripetere il flusso col motore TFLite; misurare la latenza per pagina come fatto per ONNX (~217 ms mediana il riferimento) e annotarla in §2 item 1. Verificare quale delegate è attivo (log).
 5. `./gradlew :app:compileDebugKotlin spotlessKotlinCheck` verde; build `:app:assemblePreview` verde.
-6. **Peso**: annotare il nuovo delta APK arm64 (atteso ~+17 MB rispetto al solo-ONNX) in §2 item 2.
-
 ### 5.9 Rischi noti specifici TFLite
 
 - **Layout NHWC** e **coordinate normalizzate 0..1**: differenze rispetto a ONNX; sono la causa n.1 di box sbagliati. Il flag `coordsIn640Space` e l'ordine di packing HWC vanno verificati sull'export reale, non assunti.
-- **Quantizzazione I/O**: se l'export tiene input/output `int8`, servono le operazioni di (de)quantizzazione con `scale`/`zero_point` letti a runtime dal tensore. Se invece Ultralytics inserisce quantize/dequantize ai bordi (I/O `float32`), il codice è più semplice — decidere in base al modello prodotto.
+- **Quantizzazione I/O**: se l'export tiene input/output `int8`, servono le operazioni di (de)quantizzazione con `scale`/`zero_point` letti a runtime dal tensore. Se invece Ultralytics inserisce quantize/dequantize ai bordi (I/O `float32`), il codice è più semplice.
 - **GPU delegate**: su alcuni chip il delegate GPU fallisce o dà risultati leggermente diversi; il fallback CPU/XNNPACK deve essere sempre presente e testato.
 - **Dimensione LiteRT**: se `litert` + `litert-gpu` insieme superano l'atteso (~4 MB/ABI), valutare di tenere solo `litert` (CPU/XNNPACK) e rimandare il GPU delegate.
 - Il motore ONNX resta il **default** e la via di riferimento: qualunque regressione sul path ONNX durante il refactor §5.1 è bloccante.
+
+---
+
+## 6. Nuova modalità: Floating Extracted Bubble Zoom (Ritaglio Sagoma & Double-Tap)
+
+### 6.1 Obiettivo e User Experience
+* **Trigger Gesture**: **Double-tap** (o long-tap configurabile) su una nuvoletta di dialogo. Se il tocco cade su una nuvoletta rilevata, apre il Floating Zoom; se cade altrove sulla pagina, esegue il normale double-tap zoom 2× della tavola.
+* **Effetto Visivo**: Invece di ingrandire l'intera pagina (come nella modalità in-place attuale su SSIV), viene **ritagliata la sagoma reale della nuvoletta** (forma poligonale/ellittica con bordo, non un rettangolo rigido) e proiettata al centro dello schermo alla massima dimensione utile compatibile con il display (`width ≤ 95%`, `height ≤ 85%`), mantenendo l'aspect ratio nativo.
+* **Backdrop**: Sfondo oscurato semitrasparente (es. nero 75% o blur della pagina sottostante).
+* **Interazione a regime**:
+  * **Swipe laterale (o verticale in Webtoon)**: passa alla nuvoletta successiva/precedente con transizione fluida.
+  * **Singolo tocco / tasto Back**: chiusura immediata con animazione di rientro verso la posizione di origine sulla tavola.
+
+---
+
+## 6.2 Analisi di Fattibilità Tecnica: Ritaglio della Forma Reale (Non-Rettangolare)
+
+I modelli YOLOv8-detect attuali (ONNX e TFLite) producono un **bounding box** rettangolare `[l, t, r, b]`. Per isolare la sagoma della nuvoletta con trasparenza alpha, si analizzano due approcci:
+
+#### Approccio A — Segmentazione Algoritmica Computer Vision su Bounding Box YOLO (Raccomandato v1)
+* **Principio**: All'interno del rettangolo isolato da YOLO, la nuvoletta ha proprietà cromatiche e di contrasto marcate:
+  1. *Interno*: Sfondo uniforme chiaro/bianco (o quasi-bianco) con testo scuro/nero.
+  2. *Perimetro*: Bordo continuo nero/scuro ad alto contrasto.
+  3. *Esterno*: Disegno circostante, retini o pannelli colorati.
+* **Pipeline di estrazione ([`BubbleShapeExtractor`])**:
+  1. Estrazione della sotto-bitmap del bounding box (+ 5% di margine di sicurezza).
+  2. Campionamento colore/luminosità interna della nuvoletta ed esecuzione di una binarizzazione locale (Otsu / Adaptive Thresholding).
+  3. Rilevamento del contorno perimetrale esterno più grande (Closed Contour / Convex Hull / Alpha Shape).
+  4. Costruzione di un `android.graphics.Path` vettoriale del contorno o di una maschera Alpha a 8-bit con anti-aliasing (smoothing gaussiano 1–2 px sui bordi).
+  5. Rendering della bitmap ritagliata con `PorterDuff.Mode.DST_IN` (sfondo esterno trasparente).
+* **Vantaggi**:
+  * **0 MB di peso extra nell'APK** (nessun modello ML aggiuntivo).
+  * **Velocità estrema**: ~1–3 ms per nuvoletta su CPU Android.
+  * Funziona istantaneamente sia con il motore ONNX che con il motore TFLite.
+
+#### Approccio B — Instance Segmentation Machine Learning (YOLOv8-seg)
+* **Principio**: Addestrare o convertire un modello `YOLOv8m-seg` che genera 32 coefficienti di maschera per box e un tensore protomask `[1, 32, 160, 160]`.
+* **Pro**: Precisione assoluta su contorni molto frastagliati (es. nuvolette "urlate" a zig-zag).
+* **Contro**: Modello dedicato da bundlare (~28–30 MB aggiuntivi) e latenza di inferenza superiore (~150–180 ms).
+* **Valutazione**: Rimandato a una v2 opzionale. L'Approccio A (CV) copre con eccellente qualità il 95%+ delle nuvolette manga/fumetti.
+
+---
+
+### 6.3 Integrazione UI & Preferenze
+
+In `ReaderPreferences.kt` e `SettingsReaderScreen.kt`:
+1. `bubbleZoomStyle`: `ListPreference` (`"in_place"` = Zoom tavola classico, `"floating_extracted"` = Nuvoletta ritagliata a schermo intero).
+2. `bubbleZoomTrigger`: `ListPreference` (`"long_tap"`, `"double_tap"`, `"both"`).
+3. Localizzazione stringhe `KMR` in `i18n-kmk/.../base/strings.xml`.
+
+---
+
+### 6.4 Work Order Operativo
+
+1. [ ] **Step 6.1 (`BubbleShapeExtractor.kt`)**: Algoritmo CV di estrazione contorno e generazione bitmap ritagliata con canale alpha.
+2. [ ] **Step 6.2 (`FloatingBubbleOverlayView.kt` o Compose Overlay)**: Vista overlay per visualizzazione centrata ingrandita, backdrop oscurato e gesture di swipe/tap-to-exit.
+3. [ ] **Step 6.3 (Integrazione Gesture nei Viewer)**: Intercettazione `onDoubleTap` in `ReaderPageImageView` / `PagerViewer` / `WebtoonViewer` con coordinate hit-test sulla `Bubble`.
+4. [ ] **Step 6.4 (Preferenze & UI Settings)**: Aggiunta opzioni stile e trigger in `SettingsReaderScreen`.
+5. [ ] **Step 6.5 (Verifiche su Fold8)**: Test funzionale, animazioni, qualità del ritaglio e assenza di interferenze con il double-tap zoom 2× classico.

@@ -5,14 +5,12 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.RectF
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
+import logcat.LogPriority
 import tachiyomi.core.common.util.system.logcat
 import java.nio.FloatBuffer
 import java.util.concurrent.Executors
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * [BubbleDetector] backed by ONNX Runtime and the bundled model
@@ -60,36 +58,43 @@ class OnnxBubbleDetector(context: Context) : BubbleDetector {
     override suspend fun detect(bitmap: Bitmap): List<Bubble> {
         val ortSession = session ?: return emptyList()
         return withContext(dispatcher) {
-            runCatching { infer(ortSession, bitmap) }
-                .onFailure { logcat { "OnnxBubbleDetector: inference failed: ${it.message}" } }
+            val t0 = System.currentTimeMillis()
+            val result = runCatching { infer(ortSession, bitmap) }
+                .onFailure { logcat(LogPriority.ERROR) { "OnnxBubbleDetector: inference failed: ${it.message}" } }
                 .getOrDefault(emptyList())
+            val dt = System.currentTimeMillis() - t0
+            logcat(LogPriority.INFO) { "OnnxBubbleDetector: page detected in ${dt}ms (${result.size} bubbles, ${bitmap.width}x${bitmap.height})" }
+            result
+        }
+    }
+
+    fun close() {
+        try {
+            session?.close()
+            dispatcher.close()
+        } catch (t: Throwable) {
+            logcat { "OnnxBubbleDetector: close failed: ${t.message}" }
         }
     }
 
     private fun infer(ortSession: OrtSession, bitmap: Bitmap): List<Bubble> {
         val ortEnv = env ?: return emptyList()
-        val bw = bitmap.width
-        val bh = bitmap.height
-        val gain = min(INPUT / bw.toFloat(), INPUT / bh.toFloat())
-        val nw = (bw * gain).toInt().coerceAtLeast(1)
-        val nh = (bh * gain).toInt().coerceAtLeast(1)
-        val padX = (INPUT - nw) / 2
-        val padY = (INPUT - nh) / 2
+        val lb = letterboxOf(bitmap.width, bitmap.height, INPUT)
 
-        val scaled = Bitmap.createScaledBitmap(bitmap, nw, nh, true)
+        val scaled = Bitmap.createScaledBitmap(bitmap, lb.nw, lb.nh, true)
         val pixels = pixelBuffer
-        scaled.getPixels(pixels, 0, nw, 0, 0, nw, nh)
+        scaled.getPixels(pixels, 0, lb.nw, 0, 0, lb.nw, lb.nh)
         if (scaled != bitmap) scaled.recycle()
 
         val plane = INPUT * INPUT
         val chw = inputBuffer
         java.util.Arrays.fill(chw, 114f / 255f) // letterbox grey
-        for (y in 0 until nh) {
-            val row = (y + padY) * INPUT
-            val src = y * nw
-            for (x in 0 until nw) {
+        for (y in 0 until lb.nh) {
+            val row = (y + lb.padY) * INPUT
+            val src = y * lb.nw
+            for (x in 0 until lb.nw) {
                 val p = pixels[src + x]
-                val idx = row + padX + x
+                val idx = row + lb.padX + x
                 chw[idx] = ((p shr 16) and 0xFF) / 255f
                 chw[idx + plane] = ((p shr 8) and 0xFF) / 255f
                 chw[idx + 2 * plane] = (p and 0xFF) / 255f
@@ -104,64 +109,9 @@ class OnnxBubbleDetector(context: Context) : BubbleDetector {
             ortSession.run(mapOf(ortSession.inputNames.first() to tensor)).use { results ->
                 @Suppress("UNCHECKED_CAST")
                 val out = (results[0].value as Array<Array<FloatArray>>)[0] // [features][anchors]
-                return decode(out, gain, padX.toFloat(), padY.toFloat())
+                return decodeDetections(out, lb, coordsIn640Space = true, CONF_THRESHOLD, IOU_THRESHOLD)
             }
         }
-    }
-
-    private class Det(val l: Float, val t: Float, val r: Float, val b: Float, val score: Float)
-
-    private fun decode(out: Array<FloatArray>, gain: Float, padX: Float, padY: Float): List<Bubble> {
-        val features = out.size
-        val anchors = out[0].size
-        val classes = features - 4
-
-        val dets = ArrayList<Det>()
-        for (a in 0 until anchors) {
-            var best = out[4][a]
-            for (c in 1 until classes) best = max(best, out[4 + c][a])
-            if (best < CONF_THRESHOLD) continue
-            val cx = out[0][a]
-            val cy = out[1][a]
-            val w = out[2][a]
-            val h = out[3][a]
-            dets.add(Det(cx - w / 2f, cy - h / 2f, cx + w / 2f, cy + h / 2f, best))
-        }
-        if (dets.isEmpty()) return emptyList()
-
-        dets.sortByDescending { it.score }
-        val suppressed = BooleanArray(dets.size)
-        val kept = ArrayList<Det>()
-        for (i in dets.indices) {
-            if (suppressed[i]) continue
-            kept.add(dets[i])
-            for (j in i + 1 until dets.size) {
-                if (!suppressed[j] && iou(dets[i], dets[j]) > IOU_THRESHOLD) suppressed[j] = true
-            }
-        }
-
-        // 640 letterbox space -> normalised page coordinates
-        val contentW = (INPUT - 2 * padX).coerceAtLeast(1f)
-        val contentH = (INPUT - 2 * padY).coerceAtLeast(1f)
-        return kept.map { d ->
-            Bubble(
-                RectF(
-                    ((d.l - padX) / contentW).coerceIn(0f, 1f),
-                    ((d.t - padY) / contentH).coerceIn(0f, 1f),
-                    ((d.r - padX) / contentW).coerceIn(0f, 1f),
-                    ((d.b - padY) / contentH).coerceIn(0f, 1f),
-                ),
-                d.score,
-            )
-        }
-    }
-
-    private fun iou(a: Det, b: Det): Float {
-        val ix = max(0f, min(a.r, b.r) - max(a.l, b.l))
-        val iy = max(0f, min(a.b, b.b) - max(a.t, b.t))
-        val inter = ix * iy
-        val union = (a.r - a.l) * (a.b - a.t) + (b.r - b.l) * (b.b - b.t) - inter
-        return if (union <= 0f) 0f else inter / union
     }
 
     private companion object {
