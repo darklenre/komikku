@@ -151,6 +151,7 @@ class ReaderPreferences(
     // KMK -->
     fun bubbleZoom() = preferenceStore.getBoolean("bubble_zoom", false)
     fun bubbleZoomHintShown() = preferenceStore.getBoolean("bubble_zoom_hint_shown", false)
+    fun bubbleZoomEngine() = preferenceStore.getString("bubble_zoom_engine", "onnx")
     // KMK <--
 
     fun readWithVolumeKeys() = preferenceStore.getBoolean("reader_volume_keys", false)
