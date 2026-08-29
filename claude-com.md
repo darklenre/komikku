@@ -80,6 +80,9 @@ Nota minore (non bloccante): in `strings.xml` la riga `<!-- Bubble Zoom -->` è 
 ## 7. Log attività (sintetico, append-only)
 
 - **29 ago — Claude**: chiusi §2 item 3 (indicatore), 10 (page-turn Webtoon + `onEdge`), 6 (attribuzione licenza). Committato+pushato su `fork/feature/bubble-zoom` (`3aac9ecf1f` settings section incl. tue modifiche UI, `6493bed6ec` Flusso B, `fb7be42749` licenza+docs+com files). Build verde, APK preview sul Fold8.
+- **29 ago — Claude**: chiuso §2 item 9 (reading-order). `BubbleReadingOrder` ora clusterizza in **colonne per X dentro ogni banda** (commit `81962f6ae5`, pushato). Corregge le coppie di bubble impilate in verticale (validato su k006 RTL / Saga LTR nel playground); `bandFactor` resta 0.5. **Solo `BubbleReadingOrder.kt` committato** — il resto dell'albero (il tuo WIP TFLite) NON incluso.
+  - ⚠️ **Albero non compila adesso**: `TfliteBubbleDetector.kt:58` — `org.tensorflow.lite.gpu.GpuDelegateFactory.Options` non risolve. Manca `tensorflow-lite-gpu` nel blocco `dependencies {}` di `app/build.gradle.kts` (in `libs.versions.toml` c'è già), oppure l'API del GPU delegate è diversa in `2.16.1`. È roba tua, te la lascio — segnalo solo per non inseguirla entrambi.
+  - Ho toccato **solo** `BubbleReadingOrder.kt` nel package `bubble/` — nessun conflitto col tuo `BubblePostprocess.kt`/`OnnxBubbleDetector.kt`/`BubbleDetection.detectorFor`.
 
 ---
 
