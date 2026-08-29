@@ -89,8 +89,54 @@ Nota minore (non bloccante): in `strings.xml` la riga `<!-- Bubble Zoom -->` è 
 ## 6. Stato build
 
 ```
-:app:compileDebugKotlin      ✅
+:app:compileDebugKotlin      ✅  (su HEAD 3157ef55b8, senza il WIP TFLite non committato)
 :app:spotlessKotlinCheck      ✅
 :i18n-kmk generate MR         ✅
 :app:assemblePreview          ✅  (arm64 installato su Fold8 192.168.178.93:34199)
 ```
+
+---
+
+## 8. Deploy sul Galaxy Z Fold8 (per Antigravity)
+
+Device fisico dell'utente, collegato in **wireless debugging**. Serve per validare su ARM reale (latenza, R8/minify, GPU delegate TFLite).
+
+### 8.1 Prerequisiti
+
+- SDK: `~/Android/Sdk`; adb: `~/Android/Sdk/platform-tools/adb`. `JAVA_HOME=/usr/lib/jvm/java-17-openjdk`.
+- Il Fold8 è già **accoppiato**. ID device: **`192.168.178.93:34199`** (IP fisso in LAN dell'utente; la porta di *connessione* può cambiare a ogni riavvio del debug wireless — se `adb devices` non lo mostra, chiedere all'utente la nuova `IP:porta` dalla schermata *Debug wireless* e rifare `adb connect`). Il **pairing** (porta diversa, one-shot) di norma non va rifatto.
+- Verifica: `~/Android/Sdk/platform-tools/adb devices -l` → deve elencare `192.168.178.93:34199   device  ... model:SM_F971B`.
+
+### 8.2 Build + install
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk
+cd /home/vee/git/komikku
+./gradlew :app:assemblePreview            # build type release-based: R8/minify ON, firma debug-key
+D=192.168.178.93:34199
+~/Android/Sdk/platform-tools/adb -s $D install -r --no-incremental \
+  app/build/outputs/apk/preview/app-arm64-v8a-preview.apk
+```
+
+- **Solo l'APK `arm64-v8a`** (il Fold8 è arm64). `--no-incremental` evita problemi con lo streamed install su wireless.
+- Package = **`app.komikku.beta`** (suffisso `.beta` del build type `preview`). **Il Komikku beta ufficiale dell'utente è stato disinstallato** per far posto (firme diverse): un `install -r` normale ora funziona; se ricompare `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, `adb -s $D uninstall app.komikku.beta` e reinstalla.
+- Non usare `assembleDebug` per la validazione: `debug` non ha R8 → non riproduce i problemi JNI/minify (è così che è sfuggito il crash ONNX `mid == null`).
+- Build lungo/tree grande: si può usare un `git worktree` su un commit pulito per non toccare il working tree condiviso (`git worktree add /tmp/wt <sha>` + `cp local.properties /tmp/wt/`).
+
+### 8.3 Avvio + log
+
+```bash
+D=192.168.178.93:34199
+~/Android/Sdk/platform-tools/adb -s $D shell am start -n app.komikku.beta/eu.kanade.tachiyomi.ui.main.MainActivity
+~/Android/Sdk/platform-tools/adb -s $D logcat -c    # pulisci
+# poi, mentre l'utente/tu usi il reader:
+~/Android/Sdk/platform-tools/adb -s $D logcat -v time | grep -E "OnnxBubbleDetector|TfliteBubbleDetector|bubble-detect|BubbleDetection|JNI DETECTED|SIGABRT|FATAL EXCEPTION|ReaderActivity"
+```
+
+- Crash nativi: `adb -s $D logcat -b crash -d -t 200`.
+- Screenshot (il Fold8 ha 2 display, `screencap` senza `-d` fallisce): elencare gli id con `adb -s $D shell dumpsys SurfaceFlinger --display-id`, poi `adb -s $D exec-out screencap -d <ID> -p > shot.png`. Il display interno grande è ~2448×1848, la cover ~1248×1972.
+- I gesti complessi del reader (long-press su bubble, swipe in bubble-zoom) **non sono pilotabili in modo affidabile via `adb input`** — farli fare all'utente e leggere il logcat.
+
+### 8.4 Riferimento latenza
+
+ONNX int8 @640, 1 thread, Fold8: **~217 ms/pagina** mediana (19 pagine). Confronto per il motore TFLite: misurare con la stessa sonda (log INFO attorno a `infer()` — usare `logcat(LogPriority.INFO)`, perché in `preview` il default DEBUG è filtrato) e annotare in §2 item 1 del piano.
