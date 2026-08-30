@@ -39,21 +39,22 @@ internal fun iou(a: Det, b: Det): Float {
 }
 
 /**
- * Decodes a YOLOv8-detect head from [featureMajor] ([features][anchors]) and NMS-filters it.
+ * Decodes a YOLOv8-detect head from [featureMajor] ([features][anchors]) and NMS-filters it,
+ * returning boxes as [Det]s in normalized 0..1 page coordinates. Pure — the Android-facing
+ * [decodeDetections] wraps this.
  *
  * @param coordsIn640Space true if cx,cy,w,h are in pixel coordinates (0..inputSize),
  *                         false if normalized to 0..1 relative to the letterbox square.
  */
-internal fun decodeDetections(
+internal fun decodeDetsNormalized(
     featureMajor: Array<FloatArray>,
     lb: Letterbox,
     coordsIn640Space: Boolean,
     confThreshold: Float = 0.30f,
     iouThreshold: Float = 0.45f,
-): List<Bubble> {
-    val features = featureMajor.size
+): List<Det> {
     val anchors = featureMajor[0].size
-    val classes = (features - 4).coerceAtLeast(1)
+    val classes = (featureMajor.size - 4).coerceAtLeast(1)
 
     val dets = ArrayList<Det>()
     for (a in 0 until anchors) {
@@ -91,14 +92,25 @@ internal fun decodeDetections(
     val contentW = (lb.inputSize - 2 * lb.padX).coerceAtLeast(1).toFloat()
     val contentH = (lb.inputSize - 2 * lb.padY).coerceAtLeast(1).toFloat()
     return kept.map { d ->
-        Bubble(
-            rect = RectF(
-                ((d.l - lb.padX) / contentW).coerceIn(0f, 1f),
-                ((d.t - lb.padY) / contentH).coerceIn(0f, 1f),
-                ((d.r - lb.padX) / contentW).coerceIn(0f, 1f),
-                ((d.b - lb.padY) / contentH).coerceIn(0f, 1f),
-            ),
-            confidence = d.score,
+        Det(
+            ((d.l - lb.padX) / contentW).coerceIn(0f, 1f),
+            ((d.t - lb.padY) / contentH).coerceIn(0f, 1f),
+            ((d.r - lb.padX) / contentW).coerceIn(0f, 1f),
+            ((d.b - lb.padY) / contentH).coerceIn(0f, 1f),
+            d.score,
         )
     }
 }
+
+/**
+ * Decodes a YOLOv8-detect head and NMS-filters it into [Bubble]s (rects normalized 0..1).
+ * See [decodeDetsNormalized] for the parameters.
+ */
+internal fun decodeDetections(
+    featureMajor: Array<FloatArray>,
+    lb: Letterbox,
+    coordsIn640Space: Boolean,
+    confThreshold: Float = 0.30f,
+    iouThreshold: Float = 0.45f,
+): List<Bubble> = decodeDetsNormalized(featureMajor, lb, coordsIn640Space, confThreshold, iouThreshold)
+    .map { Bubble(RectF(it.l, it.t, it.r, it.b), it.score) }

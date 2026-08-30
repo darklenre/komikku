@@ -17,37 +17,45 @@ enum class ReadingDirection { LTR, RTL, VERTICAL }
  */
 object BubbleReadingOrder {
 
+    /** Bubble box reduced to what the ordering needs — centre and size. */
+    internal class Box(val cx: Float, val cy: Float, val w: Float, val h: Float)
+
     fun sort(bubbles: List<Bubble>, direction: ReadingDirection, bandFactor: Float = 0.5f): List<Bubble> {
         if (bubbles.size <= 1) return bubbles
+        val boxes = bubbles.map { Box(it.rect.centerX(), it.rect.centerY(), it.rect.width(), it.rect.height()) }
+        return orderIndices(boxes, direction, bandFactor).map { bubbles[it] }
+    }
 
-        val heights = bubbles.map { it.rect.height() }.sorted()
-        val medianH = heights[heights.size / 2].coerceAtLeast(1e-4f)
-        val widths = bubbles.map { it.rect.width() }.sorted()
-        val medianW = widths[widths.size / 2].coerceAtLeast(1e-4f)
+    /** The pure core of [sort]: returns a permutation of `boxes.indices` in reading order. */
+    internal fun orderIndices(boxes: List<Box>, direction: ReadingDirection, bandFactor: Float = 0.5f): List<Int> {
+        if (boxes.size <= 1) return boxes.indices.toList()
 
-        val bands = cluster(bubbles, medianH * bandFactor) { it.rect.centerY() }
+        val medianH = boxes.map { it.h }.sorted()[boxes.size / 2].coerceAtLeast(1e-4f)
+        val medianW = boxes.map { it.w }.sorted()[boxes.size / 2].coerceAtLeast(1e-4f)
+
+        val bands = cluster(boxes.indices.toList(), medianH * bandFactor) { boxes[it].cy }
         return bands.flatMap { band ->
-            val columns = cluster(band, medianW * bandFactor) { it.rect.centerX() }
-                .sortedBy { column -> column.sumOf { it.rect.centerX().toDouble() } / column.size }
+            val columns = cluster(band, medianW * bandFactor) { boxes[it].cx }
+                .sortedBy { column -> column.sumOf { boxes[it].cx.toDouble() } / column.size }
             val ordered = if (direction == ReadingDirection.RTL) columns.asReversed() else columns
-            ordered.flatMap { column -> column.sortedBy { it.rect.centerY() } }
+            ordered.flatMap { column -> column.sortedBy { boxes[it].cy } }
         }
     }
 
     /** 1-D agglomerative clustering: walk points in [key] order, start a new cluster whenever the
      *  gap to the running cluster mean exceeds [threshold]. */
-    private fun cluster(bubbles: List<Bubble>, threshold: Float, key: (Bubble) -> Float): List<List<Bubble>> {
-        val sorted = bubbles.sortedBy(key)
-        val clusters = mutableListOf<MutableList<Bubble>>()
+    private fun <T> cluster(items: List<T>, threshold: Float, key: (T) -> Float): List<List<T>> {
+        val sorted = items.sortedBy(key)
+        val clusters = mutableListOf<MutableList<T>>()
         var mean = Float.NaN
-        for (b in sorted) {
-            val v = key(b)
+        for (item in sorted) {
+            val v = key(item)
             if (clusters.isEmpty() || abs(v - mean) > threshold) {
-                clusters.add(mutableListOf(b))
+                clusters.add(mutableListOf(item))
                 mean = v
             } else {
                 val c = clusters.last()
-                c.add(b)
+                c.add(item)
                 mean = c.sumOf { key(it).toDouble() }.toFloat() / c.size
             }
         }

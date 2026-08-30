@@ -9,11 +9,9 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
-import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
-import java.nio.channels.FileChannel
 import java.util.concurrent.Executors
 import kotlin.math.max
 
@@ -34,8 +32,6 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
 
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
-    private var modelStream: FileInputStream? = null
-    private var modelChannel: FileChannel? = null
     private var modelBuffer: java.nio.MappedByteBuffer? = null
 
     private var inputSize = INPUT
@@ -54,7 +50,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         try {
             // The .tflite asset is stored uncompressed (noCompress "tflite" in build.gradle.kts),
             // so it can be mmap'd straight from the APK — no copy into filesDir, no full read into heap.
-            val buffer = loadModelBuffer(context, ASSET)
+            val buffer = mmapVerifiedModel(context, ASSET, ASSET_SHA)
             modelBuffer = buffer
             val compatList = CompatibilityList()
             var createdWithGpu = false
@@ -65,7 +61,6 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
                     interpreter = Interpreter(buffer, Interpreter.Options().apply { addDelegate(delegate) })
                     gpuDelegate = delegate
                     createdWithGpu = true
-                    logcat(LogPriority.INFO) { "TfliteBubbleDetector: session ready (GPU delegate enabled)" }
                 } catch (t: Throwable) {
                     logcat(LogPriority.WARN) { "TfliteBubbleDetector: GPU delegate init failed, falling back to CPU: ${t.message}" }
                     gpuDelegate?.close()
@@ -82,7 +77,6 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
                         setNumThreads(2)
                     },
                 )
-                logcat(LogPriority.INFO) { "TfliteBubbleDetector: session ready (XNNPACK CPU)" }
             }
 
             interpreter?.let { interp ->
@@ -126,15 +120,9 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     override suspend fun detect(bitmap: Bitmap): List<Bubble> {
         val interp = interpreter ?: return emptyList()
         return withContext(dispatcher) {
-            val t0 = System.currentTimeMillis()
-            val result = runCatching { infer(interp, bitmap) }
+            runCatching { infer(interp, bitmap) }
                 .onFailure { logcat(LogPriority.ERROR) { "TfliteBubbleDetector: inference failed: ${it.message}" } }
                 .getOrDefault(emptyList())
-            val dt = System.currentTimeMillis() - t0
-            logcat(LogPriority.INFO) {
-                "TfliteBubbleDetector: page detected in ${dt}ms (${result.size} bubbles, ${bitmap.width}x${bitmap.height})"
-            }
-            result
         }
     }
 
@@ -142,8 +130,6 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         try {
             interpreter?.close()
             gpuDelegate?.close()
-            modelChannel?.close()
-            modelStream?.close()
             modelBuffer = null
             dispatcher.close()
         } catch (t: Throwable) {
@@ -220,19 +206,12 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         )
     }
 
-    private fun loadModelBuffer(context: Context, path: String): java.nio.MappedByteBuffer {
-        context.assets.openFd(path).use { fd ->
-            val stream = FileInputStream(fd.fileDescriptor)
-            val channel = stream.channel
-            modelStream = stream
-            modelChannel = channel
-            // The mapping stays valid after the fd is closed.
-            return channel.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-        }
-    }
-
     private companion object {
         const val ASSET = "models/bubble_detector_ogkalu.tflite"
+
+        /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
+        const val ASSET_SHA = "98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282"
+
         const val INPUT = 640
         const val CONF_THRESHOLD = 0.30f
         const val IOU_THRESHOLD = 0.45f

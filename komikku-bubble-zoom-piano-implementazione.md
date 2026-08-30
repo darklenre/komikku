@@ -74,14 +74,14 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 
 ## 2. Roadmap
 
-### Fase 0 — consolidamento *(si continua sul fork; PR upstream rimandata)*
+### Fase 0 — consolidamento *(si continua sul fork; PR upstream rimandata)* — **fatta**
 
-- [ ] Togliere i log INFO diagnostici (`TfliteBubbleDetector: session ready / page detected`, `SamRefiner: ready / encoded page`).
-- [ ] **Gate device adattivo**: misurare la latenza al primo run, auto-fallback (SAM → rettangolo) o disattivare se troppo lento. Oggi è solo `RAM ≥ 2 GB` (placeholder).
-- [ ] SHA-256 dei modelli verificato al load; rilascio interpreti + `embeddings` su `onTrimMemory`.
-- [ ] Cancel dell'encode SAM stantio al page-turn (ora `encLock` lo serializza fino a fine).
-- [ ] Unit test funzioni pure: `BubbleReadingOrder`, `letterboxOf`/`decodeDetections`/`iou`, `traceContour`/`chaikinClosed`.
-- [ ] Commit del working tree; tenere aggiornato questo piano.
+- [x] Tolti i log INFO diagnostici (`TfliteBubbleDetector` session/page, `SamRefiner` ready/encoded). Restano solo WARN/ERROR.
+- [x] **Gate device adattivo**: `SamRefiner` misura la latenza degli encode *interattivi*; dopo 2 encode consecutivi > 9 s → `disabledForSlowDevice` (in-memory, sopravvive a `close()`, un restart ri-valuta) → il cutout torna al rettangolo arrotondato. `RAM ≥ 2 GB` resta il gate d'ingresso.
+- [x] SHA-256 dei modelli verificato al load (`ModelIntegrity.mmapVerifiedModel`, condiviso da detector + SAM) → mismatch = init fallita pulita invece di SIGABRT. Rilascio interpreti (`BubbleDetection.releaseDetector` + `SamRefiner.close`) su `ReaderActivity.onTrimMemory(≥ RUNNING_LOW)` e `onDestroy`; la cache dei risultati resta.
+- [x] Cancel dell'encode SAM stantio al page-turn: `BubbleDetection` tiene solo i 2 warmup più recenti (`prewarmHandles`), gli altri sono cancellati e saltati all'`encLock` via `stillWanted`.
+- [x] Unit test funzioni pure (`app/src/test/.../bubble/`, 22 test): `letterboxOf`, `iou`, `decodeDetsNormalized` (+NMS), `BubbleReadingOrder.orderIndices` (LTR/RTL/griglia 2×2), `traceContour`, `chaikinClosed`. Refactor: `decodeDetections` splittata in core puro + wrapper `Bubble`; `BubbleReadingOrder.sort` → `orderIndices` su `Box` puro.
+- [x] Commit del working tree (`69e38ce496`) + questo giro.
 
 ### Fase 1 — polish a basso rischio
 

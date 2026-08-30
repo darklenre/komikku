@@ -558,7 +558,19 @@ class ReaderActivity : BaseActivity() {
         config = null
         menuToggleToast?.cancel()
         readingModeToast?.cancel()
+        // KMK --> free the Bubble Zoom model interpreters once the reader is gone
+        eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection.releaseDetector()
+        // KMK <--
     }
+
+    // KMK --> Bubble Zoom: drop the ~75 MB of detection/SAM interpreters under memory pressure
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+            eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection.releaseDetector()
+        }
+    }
+    // KMK <--
 
     override fun onPause() {
         lifecycleScope.launchNonCancellable {
