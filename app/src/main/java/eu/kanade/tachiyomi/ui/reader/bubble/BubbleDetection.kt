@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.RectF
 import android.os.Build
 import android.os.PowerManager
 import android.os.Process
@@ -21,6 +22,8 @@ import kotlinx.coroutines.launch
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.InputStream
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -66,6 +69,16 @@ object BubbleDetection {
 
     private const val DEFAULT_CONFIDENCE_PERCENT = 30
 
+    /** Boxes from different tiles overlapping by more than this IoU are treated as the same bubble. */
+    private const val MERGE_IOU = 0.4f
+
+    /** One horizontal slice of a tall (webtoon) page: full width, [topNorm]..[bottomNorm] of the page height. */
+    class DetectionTile(val bitmap: Bitmap, val topNorm: Float, val bottomNorm: Float)
+
+    private fun confidenceThreshold(): Float = runCatching {
+        Injekt.get<ReaderPreferences>().bubbleZoomConfidence().get()
+    }.getOrDefault(DEFAULT_CONFIDENCE_PERCENT).coerceIn(1, 100) / 100f
+
     private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -85,9 +98,7 @@ object BubbleDetection {
     /** Detects bubbles on [bitmap] (the final page image), caching under [key]. */
     suspend fun detect(context: Context, key: String, bitmap: Bitmap): List<Bubble> {
         cache.get(key)?.let { return it }
-        val confThreshold = runCatching {
-            Injekt.get<ReaderPreferences>().bubbleZoomConfidence().get()
-        }.getOrDefault(DEFAULT_CONFIDENCE_PERCENT).coerceIn(1, 100) / 100f
+        val confThreshold = confidenceThreshold()
         _activeDetections.update { it + 1 }
         try {
             val result = detectorFor(context.applicationContext)
@@ -99,6 +110,70 @@ object BubbleDetection {
         } finally {
             _activeDetections.update { it - 1 }
         }
+    }
+
+    /**
+     * Like [enqueue] but for a tall (webtoon) page sliced into overlapping [tiles]: detects each tile,
+     * maps the boxes back to full-page 0..1 coordinates and merges duplicates across tile seams.
+     * Every tile bitmap is recycled on completion.
+     */
+    fun enqueueTiled(context: Context, key: String, tiles: List<DetectionTile>) {
+        detectionScope.launch {
+            try {
+                detectTiled(context.applicationContext, key, tiles)
+            } finally {
+                tiles.forEach { it.bitmap.recycle() }
+            }
+        }
+    }
+
+    private suspend fun detectTiled(context: Context, key: String, tiles: List<DetectionTile>): List<Bubble> {
+        cache.get(key)?.let { return it }
+        val confThreshold = confidenceThreshold()
+        _activeDetections.update { it + 1 }
+        try {
+            val detector = detectorFor(context.applicationContext).takeIf { it.isAvailable }
+            val merged = ArrayList<Bubble>()
+            if (detector != null) {
+                for (tile in tiles) {
+                    val span = (tile.bottomNorm - tile.topNorm).coerceAtLeast(1e-4f)
+                    for (b in detector.detect(tile.bitmap, confThreshold)) {
+                        merged += Bubble(
+                            RectF(
+                                b.rect.left,
+                                tile.topNorm + b.rect.top * span,
+                                b.rect.right,
+                                tile.topNorm + b.rect.bottom * span,
+                            ),
+                            b.confidence,
+                        )
+                    }
+                }
+            }
+            val result = dedupeBubbles(merged)
+            cache.put(key, result)
+            return result
+        } finally {
+            _activeDetections.update { it - 1 }
+        }
+    }
+
+    /** Greedy NMS on merged tile detections: keep by confidence, drop anything overlapping a kept box. */
+    private fun dedupeBubbles(bubbles: List<Bubble>): List<Bubble> {
+        if (bubbles.size <= 1) return bubbles
+        val kept = ArrayList<Bubble>(bubbles.size)
+        for (b in bubbles.sortedByDescending { it.confidence }) {
+            if (kept.none { rectIoU(it.rect, b.rect) > MERGE_IOU }) kept += b
+        }
+        return kept
+    }
+
+    private fun rectIoU(a: RectF, b: RectF): Float {
+        val ix = (min(a.right, b.right) - max(a.left, b.left)).coerceAtLeast(0f)
+        val iy = (min(a.bottom, b.bottom) - max(a.top, b.top)).coerceAtLeast(0f)
+        val inter = ix * iy
+        val union = a.width() * a.height() + b.width() * b.height() - inter
+        return if (union <= 0f) 0f else inter / union
     }
 
     /** Most-recent background SAM warmups, oldest first; superseded ones are cancelled (see [prewarmSam]). */
