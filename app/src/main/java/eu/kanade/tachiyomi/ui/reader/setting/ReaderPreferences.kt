@@ -154,7 +154,7 @@ class ReaderPreferences(
     fun bubbleZoomInPlaceGesture() = preferenceStore.getString("bubble_zoom_in_place_gesture", "long_tap")
     fun bubbleZoomFloatingGesture() = preferenceStore.getString("bubble_zoom_floating_gesture", "double_tap")
 
-    /** Floating-cutout shape: "none" (rounded rect) or "sam" (MobileSAM refinement). */
+    /** Floating-cutout shape: "none" (rounded rect) or "sam" (EdgeSAM refinement). */
     fun bubbleZoomCroppingMethod() = preferenceStore.getString("bubble_zoom_cropping_method", "sam")
     fun bubbleZoomOutline() = preferenceStore.getBoolean("bubble_zoom_outline", true)
 

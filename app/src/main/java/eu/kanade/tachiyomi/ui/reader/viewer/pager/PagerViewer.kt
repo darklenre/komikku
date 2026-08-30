@@ -22,6 +22,7 @@ import eu.kanade.tachiyomi.ui.reader.bubble.BubbleHit
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
 import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
 import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
+import eu.kanade.tachiyomi.ui.reader.bubble.mergeLinked
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.InsertPage
 import eu.kanade.tachiyomi.ui.reader.model.ReaderItem
@@ -238,10 +239,10 @@ abstract class PagerViewer(
     private val bubbleReadingDirection
         get() = if (this is R2LPagerViewer) ReadingDirection.RTL else ReadingDirection.LTR
 
-    /** Cached bubbles for [page] in reading order; rects stay normalised 0..1. Null if not ready. */
+    /** Cached bubbles for [page], linked lobes merged, in reading order; rects 0..1. Null if not ready. */
     private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
-        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection)
+        return BubbleReadingOrder.sort(mergeLinked(bubbles), bubbleReadingDirection)
     }
 
     /**

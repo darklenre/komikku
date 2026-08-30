@@ -373,7 +373,7 @@ class ReaderActivity : BaseActivity() {
                 AppBars(state = state)
 
                 // KMK --> Bubble Zoom: thin indeterminate bar while a page's bubble detection runs, or
-                // while an interactive MobileSAM image-encode blocks an open floating cutout.
+                // while an interactive EdgeSAM image-encode blocks an open floating cutout.
                 val bubbleDetections by BubbleDetection.activeDetections.collectAsState()
                 val samEncodes by eu.kanade.tachiyomi.ui.reader.bubble.SamRefiner.activeEncodes.collectAsState()
                 if (bubbleDetections > 0 || samEncodes > 0) {

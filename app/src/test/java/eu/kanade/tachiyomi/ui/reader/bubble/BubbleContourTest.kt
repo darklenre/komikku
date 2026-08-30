@@ -71,4 +71,24 @@ class BubbleContourTest {
     }
 
     // endregion
+
+    // region decimateClosed
+
+    @Test
+    fun `decimate thins a dense polygon to the target count`() {
+        val dense = FloatArray(400) { it.toFloat() } // 200 points
+        val out = BubbleExtractor.decimateClosed(dense, 50)
+        assertEquals(50 * 2, out.size)
+        // first kept vertex is the first input vertex
+        assertEquals(0f, out[0])
+        assertEquals(1f, out[1])
+    }
+
+    @Test
+    fun `decimate leaves a polygon that is already sparse untouched`() {
+        val square = floatArrayOf(0f, 0f, 10f, 0f, 10f, 10f, 0f, 10f)
+        assertTrue(square.contentEquals(BubbleExtractor.decimateClosed(square, 100)))
+    }
+
+    // endregion
 }

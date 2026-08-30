@@ -187,7 +187,7 @@ object BubbleDetection {
     }
 
     /**
-     * Kicks a background MobileSAM image-encode for [key] so the first floating cutout on the page
+     * Kicks a background EdgeSAM image-encode for [key] so the first floating cutout on the page
      * doesn't pay the ~2 s encoder latency. No-op unless the cutout method actually uses SAM.
      *
      * Called per page holder as it binds. Only the [MAX_INFLIGHT_PREWARM] most-recently-requested
@@ -257,5 +257,103 @@ object BubbleDetection {
                 }
             }.also { detector = it }
         }
+    }
+}
+
+/**
+ * Union-find grouping of boxes `[l, t, r, b]` (normalised 0..1) that are lobes of one linked speech
+ * balloon. Two boxes link when, on one axis, they overlap by at least [overlapFrac] of the smaller
+ * box's extent on that axis, and on the other axis their gap (which may be negative, i.e. they
+ * touch/overlap) is within [stackGapFrac] of the smaller box for a vertical stack or [sideGapFrac]
+ * for a side-by-side pair. Returns index groups (singletons included); the first-seen member fixes
+ * each group's order.
+ *
+ * Top-level (not on [BubbleDetection]) so unit tests can exercise it without class-loading the
+ * object's Android-typed fields.
+ */
+internal fun groupLinked(
+    boxes: List<FloatArray>,
+    overlapFrac: Float,
+    stackGapFrac: Float,
+    sideGapFrac: Float,
+): List<List<Int>> {
+    val n = boxes.size
+    val parent = IntArray(n) { it }
+    fun find(a: Int): Int {
+        var x = a
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        }
+        return x
+    }
+    fun union(a: Int, b: Int) {
+        val ra = find(a)
+        val rb = find(b)
+        if (ra != rb) parent[maxOf(ra, rb)] = minOf(ra, rb)
+    }
+    for (i in 0 until n) {
+        for (j in i + 1 until n) {
+            val a = boxes[i]
+            val c = boxes[j]
+            val wa = a[2] - a[0]
+            val wc = c[2] - c[0]
+            val ha = a[3] - a[1]
+            val hc = c[3] - c[1]
+            if (wa <= 0f || wc <= 0f || ha <= 0f || hc <= 0f) continue
+            val minW = minOf(wa, wc)
+            val minH = minOf(ha, hc)
+            val overlapX = minOf(a[2], c[2]) - maxOf(a[0], c[0])
+            val overlapY = minOf(a[3], c[3]) - maxOf(a[1], c[1])
+            val gapX = maxOf(a[0], c[0]) - minOf(a[2], c[2])
+            val gapY = maxOf(a[1], c[1]) - minOf(a[3], c[3])
+            val stacked = overlapX >= overlapFrac * minW && gapY <= stackGapFrac * minH
+            val sideBySide = overlapY >= overlapFrac * minH && gapX <= sideGapFrac * minW
+            if (stacked || sideBySide) union(i, j)
+        }
+    }
+    val byRoot = LinkedHashMap<Int, MutableList<Int>>()
+    for (i in 0 until n) byRoot.getOrPut(find(i)) { mutableListOf() }.add(i)
+    return byRoot.values.map { it.toList() }
+}
+
+/**
+ * On one axis two boxes must overlap by at least this fraction of the smaller box to count as lobes
+ * of the same linked balloon.
+ */
+private const val LINK_OVERLAP_FRAC = 0.5f
+
+/** Max vertical gap between stacked lobes, as a fraction of the shorter box (negative = overlap). */
+private const val LINK_STACK_GAP_FRAC = 0.35f
+
+/**
+ * Max horizontal gap between side-by-side lobes, as a fraction of the narrower box. Tighter than the
+ * stacked case: side-by-side balloons must nearly touch, or two separate balloons from one speaker
+ * sitting near each other get swallowed.
+ */
+private const val LINK_SIDE_GAP_FRAC = 0.16f
+
+/**
+ * Collapses [groupLinked] groups of `bubbles` into one [Bubble] each: [Bubble.rect] is the union of
+ * the group and [Bubble.lobes] carries the original per-lobe rects (null for a lone bubble) so the
+ * extractor can mask each lobe on its own. Input order is preserved by each group's first member.
+ */
+internal fun mergeLinked(bubbles: List<Bubble>): List<Bubble> {
+    if (bubbles.size <= 1) return bubbles
+    val boxes = bubbles.map { floatArrayOf(it.rect.left, it.rect.top, it.rect.right, it.rect.bottom) }
+    val groups = groupLinked(boxes, LINK_OVERLAP_FRAC, LINK_STACK_GAP_FRAC, LINK_SIDE_GAP_FRAC)
+    if (groups.size == bubbles.size) return bubbles
+    return groups.map { group ->
+        if (group.size == 1) return@map bubbles[group[0]]
+        val union = RectF(1f, 1f, 0f, 0f)
+        var conf = 0f
+        val lobes = ArrayList<RectF>(group.size)
+        for (idx in group) {
+            val rect = bubbles[idx].rect
+            union.union(rect)
+            conf = maxOf(conf, bubbles[idx].confidence)
+            lobes += RectF(rect)
+        }
+        Bubble(union, conf, lobes)
     }
 }
