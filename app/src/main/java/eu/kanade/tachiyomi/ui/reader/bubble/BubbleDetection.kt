@@ -9,6 +9,7 @@ import androidx.core.content.getSystemService
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -90,13 +91,24 @@ object BubbleDetection {
         }
     }
 
+    /** Most-recent background SAM warmups, oldest first; superseded ones are cancelled (see [prewarmSam]). */
+    private val prewarmHandles = ArrayDeque<PrewarmHandle>()
+    private const val MAX_INFLIGHT_PREWARM = 2
+
+    private class PrewarmHandle(val key: String) {
+        @Volatile
+        var cancelled = false
+        var job: Job? = null
+    }
+
     /**
      * Kicks a background MobileSAM image-encode for [key] so the first floating cutout on the page
-     * doesn't pay the ~2-3 s encoder latency. No-op unless the cutout method actually uses SAM.
+     * doesn't pay the ~2 s encoder latency. No-op unless the cutout method actually uses SAM.
      *
-     * Called per page holder as it binds; [SamRefiner] serialises the encodes on one lock and skips
-     * pages whose embedding is already cached, so the reader's preload turns into at most a handful
-     * of queued encodes that then go idle — in steady-state reading it is one encode per page turn.
+     * Called per page holder as it binds. Only the [MAX_INFLIGHT_PREWARM] most-recently-requested
+     * pages stay live; older warmups are cancelled and skipped once they reach the encode lock, so
+     * fast scrolling can't build a long tail of wasted ~2 s encodes. [SamRefiner] also skips pages
+     * whose embedding is already cached, so steady-state reading is one encode per page turn.
      */
     fun prewarmSam(context: Context, key: String, streamFn: () -> InputStream) {
         val method = try {
@@ -106,9 +118,36 @@ object BubbleDetection {
         }
         if (method != "sam") return
         val appContext = context.applicationContext
-        detectionScope.launch {
-            runCatching { SamRefiner.prewarm(appContext, key, streamFn) }
+
+        val handle = PrewarmHandle(key)
+        synchronized(prewarmHandles) {
+            prewarmHandles.addLast(handle)
+            while (prewarmHandles.size > MAX_INFLIGHT_PREWARM) {
+                val stale = prewarmHandles.removeFirst()
+                stale.cancelled = true
+                stale.job?.cancel()
+            }
         }
+        handle.job = detectionScope.launch {
+            try {
+                runCatching { SamRefiner.prewarm(appContext, key, streamFn) { !handle.cancelled } }
+            } finally {
+                synchronized(prewarmHandles) { prewarmHandles.remove(handle) }
+            }
+        }
+    }
+
+    /**
+     * Releases the detector interpreter (and, via [SamRefiner.close], the SAM models). Called on a
+     * low-memory trim and when the reader is destroyed; the cached results are kept — they're cheap
+     * and let a re-opened page skip re-detection. The detector re-initialises lazily on next use.
+     */
+    fun releaseDetector() {
+        synchronized(this) {
+            (detector as? TfliteBubbleDetector)?.close()
+            detector = null
+        }
+        SamRefiner.close()
     }
 
     private fun detectorFor(appContext: Context): BubbleDetector {

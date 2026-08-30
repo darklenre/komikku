@@ -15,12 +15,10 @@ import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
 import java.io.Closeable
-import java.io.FileInputStream
 import java.io.InputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
-import java.nio.channels.FileChannel
 import kotlin.math.max
 import kotlin.math.roundToInt
 
@@ -38,9 +36,22 @@ object SamRefiner {
 
     private const val ENCODER_ASSET = "models/sam_encoder.tflite"
     private const val DECODER_ASSET = "models/sam_decoder.tflite"
+
+    /** SHA-256 of the bundled assets — a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
+    private const val ENCODER_SHA = "b3b734716433bbd14d5b139727a5988d775e22e7cad5632fe007c1c9f3f5fcef"
+    private const val DECODER_SHA = "c12448a26bbb35adc3d2f246d8c418cd82a8af3044f71a300acae60c81692d0b"
+
     private const val INPUT = 1024
     private const val EMBED_LEN = 256 * 64 * 64
     private const val MASK = 256
+
+    /**
+     * If the first few interactive encodes are all slower than this, the device can't run MobileSAM
+     * at a usable latency: [disabledForSlowDevice] latches and the cutout silently falls back to the
+     * rounded rectangle for the rest of the process (a restart re-evaluates).
+     */
+    private const val SLOW_ENCODE_MS = 9_000L
+    private const val SLOW_ENCODE_STREAK_TO_DISABLE = 2
 
     // SAM pixel normalisation (ImageNet-style, applied in the 0..255 domain).
     private val PIX_MEAN = floatArrayOf(123.675f, 116.28f, 103.53f)
@@ -62,6 +73,17 @@ object SamRefiner {
     private var encBackend = "cpu"
     private var decBackend = "cpu"
 
+    private var slowEncodeStreak = 0
+
+    /**
+     * Latched once the device has proven too slow for SAM (see [SLOW_ENCODE_MS]). Survives [close]
+     * so a low-memory trim doesn't hand a slow device another round of 9 s encodes; cleared only by
+     * a process restart.
+     */
+    @Volatile
+    var disabledForSlowDevice = false
+        private set
+
     /** Cached page embeddings: 256*64*64 f32 = 4 MB each. Sized to cover the reader's page preload. */
     private val embeddings = LruCache<String, FloatArray>(4)
 
@@ -77,11 +99,11 @@ object SamRefiner {
 
     private fun ensureInit(context: Context) {
         synchronized(initLock) {
-            if (triedInit) return
+            if (triedInit || disabledForSlowDevice) return
             triedInit = true
             runCatching {
-                encoder = makeInterpreter(mmapAsset(context, ENCODER_ASSET)) { encBackend = it }
-                decoder = makeInterpreter(mmapAsset(context, DECODER_ASSET)) { decBackend = it }
+                encoder = makeInterpreter(mmapVerifiedModel(context, ENCODER_ASSET, ENCODER_SHA)) { encBackend = it }
+                decoder = makeInterpreter(mmapVerifiedModel(context, DECODER_ASSET, DECODER_SHA)) { decBackend = it }
                 encoder?.let { e ->
                     val s = e.getInputTensor(0).shape()
                     encNhwc = s.size == 4 && s[3] == 3
@@ -93,10 +115,6 @@ object SamRefiner {
                     for (i in 0 until d.outputTensorCount) {
                         if (d.getOutputTensor(i).shape().size >= 4) decMaskOutIdx = i else decIouOutIdx = i
                     }
-                }
-                logcat(LogPriority.INFO) {
-                    "SamRefiner: ready (encBackend=$encBackend decBackend=$decBackend encNhwc=$encNhwc " +
-                        "decoder in embed=#$decEmbedInIdx box=#$decBoxInIdx out mask=#$decMaskOutIdx iou=#$decIouOutIdx)"
                 }
             }.onFailure {
                 logcat(LogPriority.ERROR) { "SamRefiner: init failed: ${it.message}" }
@@ -112,8 +130,13 @@ object SamRefiner {
         }
     }
 
-    /** Ensures this page's embedding is cached (runs the ~expensive encoder if needed). Safe to call off the hot path. */
-    fun prewarm(context: Context, pageKey: String, streamFn: () -> InputStream) {
+    /**
+     * Ensures this page's embedding is cached (runs the ~expensive encoder if needed). Safe to call
+     * off the hot path. [stillWanted] is re-checked right before the encode actually starts, so a
+     * page the reader has already scrolled past (its warmup superseded) costs nothing once dequeued.
+     */
+    fun prewarm(context: Context, pageKey: String, streamFn: () -> InputStream, stillWanted: () -> Boolean = { true }) {
+        if (disabledForSlowDevice) return
         ensureInit(context)
         if (encoder == null || embeddings.get(pageKey) != null) return
         val (pw, ph) = pageDims(streamFn) ?: return
@@ -124,12 +147,15 @@ object SamRefiner {
             (pw * gain).roundToInt().coerceIn(1, INPUT),
             (ph * gain).roundToInt().coerceIn(1, INPUT),
             foreground = false,
+            stillWanted = stillWanted,
         )
     }
 
     /**
      * @param foreground when true and an encode actually has to run, it is counted toward
      *   [activeEncodes] (the caller is waiting on it with an open cutout).
+     * @param stillWanted gate evaluated once the encode lock is held; a false return skips the encode
+     *   (used to drop superseded background warmups). Foreground callers always pass `{ true }`.
      */
     private fun embedFor(
         pageKey: String,
@@ -137,23 +163,37 @@ object SamRefiner {
         nw: Int,
         nh: Int,
         foreground: Boolean,
+        stillWanted: () -> Boolean = { true },
     ): FloatArray? {
         embeddings.get(pageKey)?.let { return it }
         synchronized(encLock) {
             embeddings.get(pageKey)?.let { return it }
             val enc = encoder ?: return null
+            if (!foreground && !stillWanted()) return null
             if (foreground) _activeEncodes.update { it + 1 }
             try {
                 val t0 = System.currentTimeMillis()
                 val e = runEncoder(enc, streamFn, nw, nh) ?: return null
-                logcat(LogPriority.INFO) {
-                    "SamRefiner: encoded page in ${System.currentTimeMillis() - t0}ms (backend=$encBackend)"
-                }
+                if (foreground) noteEncodeLatency(System.currentTimeMillis() - t0)
                 embeddings.put(pageKey, e)
                 return e
             } finally {
                 if (foreground) _activeEncodes.update { it - 1 }
             }
+        }
+    }
+
+    /** Latches [disabledForSlowDevice] after a run of interactive encodes all slower than [SLOW_ENCODE_MS]. */
+    private fun noteEncodeLatency(ms: Long) {
+        if (ms >= SLOW_ENCODE_MS) {
+            if (++slowEncodeStreak >= SLOW_ENCODE_STREAK_TO_DISABLE) {
+                disabledForSlowDevice = true
+                logcat(LogPriority.WARN) {
+                    "SamRefiner: encode ~${ms}ms (backend=$encBackend) x$slowEncodeStreak — disabling SAM refinement for this session"
+                }
+            }
+        } else {
+            slowEncodeStreak = 0
         }
     }
 
@@ -171,6 +211,7 @@ object SamRefiner {
         outW: Int,
         outH: Int,
     ): Bitmap? {
+        if (disabledForSlowDevice) return null
         ensureInit(context)
         val dec = decoder ?: return null
 
@@ -477,15 +518,6 @@ object SamRefiner {
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
         return runCatching { streamFn().use { BitmapFactory.decodeStream(it, null, opts) } }.getOrNull()
-    }
-
-    private fun mmapAsset(context: Context, path: String): MappedByteBuffer {
-        context.assets.openFd(path).use { fd ->
-            FileInputStream(fd.fileDescriptor).channel.use { ch ->
-                // The mapping stays valid after the fd/channel are closed.
-                return ch.map(FileChannel.MapMode.READ_ONLY, fd.startOffset, fd.declaredLength)
-            }
-        }
     }
 
     /**

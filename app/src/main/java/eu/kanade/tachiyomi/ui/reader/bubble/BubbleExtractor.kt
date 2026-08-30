@@ -232,7 +232,7 @@ object BubbleExtractor {
      * Moore-neighbour boundary trace of the first (row-major) opaque blob in [inside]. Returns the
      * pixel-centre polygon (x,y pairs, closed), or null if the blob is tiny / absent.
      */
-    private fun traceContour(inside: BooleanArray, w: Int, h: Int): FloatArray? {
+    internal fun traceContour(inside: BooleanArray, w: Int, h: Int): FloatArray? {
         // Moore ring, clockwise from East.
         val dx = intArrayOf(1, 1, 0, -1, -1, -1, 0, 1)
         val dy = intArrayOf(0, 1, 1, 1, 0, -1, -1, -1)
@@ -295,8 +295,8 @@ object BubbleExtractor {
         return if (pts.size >= 24) pts.toFloatArray() else null
     }
 
-    /** One round of Chaikin corner-cutting on a closed polygon (x,y pairs). Quadruples the points. */
-    private fun chaikinClosed(p: FloatArray): FloatArray {
+    /** One round of Chaikin corner-cutting on a closed polygon (x,y pairs). Doubles the point count. */
+    internal fun chaikinClosed(p: FloatArray): FloatArray {
         val n = p.size / 2
         if (n < 4) return p
         val out = FloatArray(n * 4)
