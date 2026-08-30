@@ -30,7 +30,8 @@ import kotlin.math.min
  *  - `"none"`: a rounded rectangle.
  *  - `"sam"`: a MobileSAM box-prompted mask ([SamRefiner]) — falls back to the rounded rectangle
  *    when SAM is unavailable.
- * A uniform black sticker outline is added when [ReaderPreferences.bubbleZoomOutline] is on.
+ * The silhouette is also traced to a vector [BubbleCutout.outline] (stroked live by the overlay when
+ * [ReaderPreferences.bubbleZoomOutline] is on) and its body centre is found for tail-aware framing.
  */
 object BubbleExtractor {
 
@@ -43,8 +44,11 @@ object BubbleExtractor {
     /** Fallback sticker-outline width (percent of the cutout's short side) if the pref can't be read. */
     private const val OUTLINE_PCT_DEFAULT = 3
 
-    /** Extracts [bubble] from [page] as a shaped, high-resolution bitmap. */
-    fun extractBubble(page: ReaderPage, bubble: Bubble, sourceSize: Size?): Bitmap? {
+    /** Short-side resolution the silhouette is traced / eroded at (keeps the vector outline light). */
+    private const val SILHOUETTE_GRID = 256
+
+    /** Extracts [bubble] from [page] as a shaped, high-resolution [BubbleCutout] (bitmap + live outline). */
+    fun extractBubble(page: ReaderPage, bubble: Bubble, sourceSize: Size?): BubbleCutout? {
         val streamFn = page.stream ?: return null
 
         val prefs = runCatching { Injekt.get<ReaderPreferences>() }.getOrNull()
@@ -110,14 +114,15 @@ object BubbleExtractor {
         expandedCrop: RectF? = null,
         streamFn: (() -> InputStream)? = null,
         context: Context? = null,
-    ): Bitmap {
+    ): BubbleCutout {
         val cropW = cropped.width
         val cropH = cropped.height
-        if (cropW <= 8 || cropH <= 8) return cropped
+        if (cropW <= 8 || cropH <= 8) return BubbleCutout(cropped)
 
         val result = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         canvas.drawBitmap(cropped, 0f, 0f, null)
+        if (cropped !== result) cropped.recycle()
 
         val shape = if (method == "sam") {
             samShape(context, page, streamFn, bubble, expandedCrop, cropW, cropH)
@@ -139,7 +144,94 @@ object BubbleExtractor {
             )
             shape.recycle()
         }
-        return if (outline) applyStickerOutline(result, outlinePct) else result
+
+        val info = analyzeSilhouette(result, if (outline) outlinePct else 0)
+        return BubbleCutout(result, info.path, info.fraction, info.bodyOffsetX, info.bodyOffsetY)
+    }
+
+    private class Silhouette(
+        val path: Path?,
+        val fraction: Float,
+        val bodyOffsetX: Float,
+        val bodyOffsetY: Float,
+    )
+
+    /**
+     * Traces the shaped bitmap's alpha silhouette (on a coarse [SILHOUETTE_GRID] grid) into a
+     * smoothed closed [Path] in the unit square, and finds the bubble *body* centre by eroding away
+     * the thin tail — so the overlay can frame on the body and stroke the outline live.
+     * [outlinePct] <= 0 skips the path.
+     */
+    private fun analyzeSilhouette(bmp: Bitmap, outlinePct: Int): Silhouette {
+        val w = bmp.width
+        val h = bmp.height
+        val stride = max(1, min(w, h) / SILHOUETTE_GRID)
+        val gw = w / stride
+        val gh = h / stride
+        if (gw < 8 || gh < 8) return Silhouette(null, 0f, 0f, 0f)
+
+        val inside = BooleanArray(gw * gh)
+        val row = IntArray(w)
+        for (gy in 0 until gh) {
+            bmp.getPixels(row, 0, w, 0, gy * stride, w, 1)
+            for (gx in 0 until gw) inside[gy * gw + gx] = (row[gx * stride] ushr 24) >= 128
+        }
+
+        val (bcx, bcy) = bodyCentre(inside, gw, gh)
+
+        val path = if (outlinePct <= 0) {
+            null
+        } else {
+            traceContour(inside, gw, gh)?.let { contour ->
+                val smooth = chaikinClosed(chaikinClosed(contour))
+                Path().apply {
+                    moveTo(smooth[0] / gw, smooth[1] / gh)
+                    var i = 2
+                    while (i < smooth.size) {
+                        lineTo(smooth[i] / gw, smooth[i + 1] / gh)
+                        i += 2
+                    }
+                    close()
+                }
+            }
+        }
+        return Silhouette(path, outlinePct / 100f, bcx - 0.5f, bcy - 0.5f)
+    }
+
+    /**
+     * Centre (0..1) of the bubble body: erode the silhouette a few cells to drop the thin tail, then
+     * take the bounding box of what survives. Falls back to (0.5, 0.5) if erosion clears everything.
+     */
+    private fun bodyCentre(inside: BooleanArray, gw: Int, gh: Int): Pair<Float, Float> {
+        val iters = max(1, min(gw, gh) / 12)
+        var cur = inside
+        repeat(iters) {
+            val next = BooleanArray(cur.size)
+            for (y in 0 until gh) {
+                for (x in 0 until gw) {
+                    val i = y * gw + x
+                    if (!cur[i]) continue
+                    next[i] = x > 0 && cur[i - 1] && x < gw - 1 && cur[i + 1] &&
+                        y > 0 && cur[i - gw] && y < gh - 1 && cur[i + gw]
+                }
+            }
+            cur = next
+        }
+        var minX = gw
+        var minY = gh
+        var maxX = -1
+        var maxY = -1
+        for (y in 0 until gh) {
+            for (x in 0 until gw) {
+                if (!cur[y * gw + x]) continue
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+            }
+        }
+        if (maxX < 0) return 0.5f to 0.5f
+        return (minX + maxX + 1) / 2f / gw to (minY + maxY + 1) / 2f / gh
     }
 
     /** DST_IN a 12%-radius rounded rectangle onto [canvas]. */
@@ -180,52 +272,6 @@ object BubbleExtractor {
                 outH = h,
             )
         }.getOrNull()
-    }
-
-    /**
-     * WhatsApp/Telegram-sticker outline: a uniform solid-black border of constant width hugging the
-     * cutout, with a crisp Canvas-antialiased edge (no blur, no visible pixels). The cutout's alpha
-     * silhouette is traced to a vector contour, corner-cut smooth, then drawn as a black
-     * FILL_AND_STROKE path ([pct]% of the short side each side, round joins) with the cutout composited
-     * on top. Returns a new bitmap and recycles [bmp]; returns [bmp] unchanged if the silhouette is
-     * too small to trace.
-     */
-    private fun applyStickerOutline(bmp: Bitmap, pct: Int): Bitmap {
-        val w = bmp.width
-        val h = bmp.height
-        val ring = (min(w, h) * pct / 100f).coerceAtLeast(1f)
-
-        val alpha = IntArray(w * h)
-        bmp.getPixels(alpha, 0, w, 0, 0, w, h)
-        val inside = BooleanArray(w * h) { (alpha[it] ushr 24) >= 128 }
-
-        val contour = traceContour(inside, w, h) ?: return bmp
-        val smooth = chaikinClosed(chaikinClosed(contour))
-        val path = Path().apply {
-            moveTo(smooth[0], smooth[1])
-            var i = 2
-            while (i < smooth.size) {
-                lineTo(smooth[i], smooth[i + 1])
-                i += 2
-            }
-            close()
-        }
-
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.drawPath(
-            path,
-            Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = 0xFF000000.toInt()
-                style = Paint.Style.FILL_AND_STROKE
-                strokeWidth = ring * 2f
-                strokeJoin = Paint.Join.ROUND
-                strokeCap = Paint.Cap.ROUND
-            },
-        )
-        canvas.drawBitmap(bmp, 0f, 0f, null)
-        bmp.recycle()
-        return out
     }
 
     /**

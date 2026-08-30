@@ -94,9 +94,9 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 
 ### Fase 2 — profondità cutout
 
-- [ ] **Outline vettoriale live**: disegnare il `Path` in `onDraw` dell'overlay invece di rasterizzarlo nel bitmap → razor-sharp a qualsiasi scala.
+- [x] **Outline vettoriale live**: `BubbleExtractor` non rasterizza più il contorno; restituisce `BubbleCutout(bitmap, outline: Path?, outlineFraction, bodyOffsetX/Y)` con il `Path` in coord unità 0..1. L'overlay (`drawCutout`) lo mappa sul rect di disegno con una `Matrix` e lo `STROKE`a live (`strokeWidth = outlineFraction·min(w,h)·2`) → bordo netto (AA del Canvas) a qualsiasi scala, anche in animazione ingresso/uscita. Traccia su griglia coarse `SILHOUETTE_GRID = 256` per tenere il `Path` leggero.
 - [ ] **Pinch / pan dentro il cutout flottante** (dipende dal punto sopra) — per nuvolette lunghe il testo resta piccolo.
-- [ ] Framing tail-aware: centrare sul testo, non sul centro geometrico del box.
+- [x] **Framing tail-aware**: `BubbleExtractor.bodyCentre` erode la silhouette (~`min(gw,gh)/12` iter) per togliere la coda sottile, bbox del residuo → centro del *corpo*; l'overlay inquadra su quello (`bodyOffset` clampato a ±12 %, rect tenuto on-screen) invece che sul centro geometrico del bitmap.
 
 ### Fase 3 — profondità detection
 

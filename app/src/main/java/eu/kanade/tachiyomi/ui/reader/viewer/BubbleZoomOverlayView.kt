@@ -2,10 +2,11 @@ package eu.kanade.tachiyomi.ui.reader.viewer
 
 import android.annotation.SuppressLint
 import android.content.Context
-import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.os.SystemClock
 import android.util.AttributeSet
@@ -16,6 +17,7 @@ import android.view.MotionEvent
 import android.view.View
 import androidx.core.view.isVisible
 import eu.kanade.tachiyomi.ui.reader.bubble.Bubble
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleCutout
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleExtractor
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import kotlinx.coroutines.CoroutineScope
@@ -50,7 +52,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private var bubbleRects: List<RectF> = emptyList()
     /** Source-image size in px, for converting the normalised rects when a px rect is needed. */
     private var sourceSize: Size = Size(0, 0)
-    private val extractedBitmaps: MutableMap<Int, Bitmap?> = mutableMapOf()
+    private val extractedCutouts: MutableMap<Int, BubbleCutout?> = mutableMapOf()
     private var zoomStyle = ZoomStyle.IN_PLACE
 
     private var index = 0
@@ -97,6 +99,17 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private val backdropPaint = Paint().apply {
         color = Color.argb(BACKDROP_ALPHA, 0, 0, 0) // Dimmed 82% black backdrop
     }
+
+    /** Sticker outline, stroked live from [BubbleCutout.outline] so the edge stays crisp at any scale. */
+    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val outlineMatrix = Matrix()
+    private val outlinePath = Path()
+    private val unitRect = RectF(0f, 0f, 1f, 1f)
 
     private val gestureDetector = GestureDetector(
         context,
@@ -159,7 +172,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         this.sourceSize = sourceSize
         this.zoomStyle = style
         this.backdropEnabled = backdrop
-        this.extractedBitmaps.clear()
+        this.extractedCutouts.clear()
         this.index = startIndex.coerceIn(0, bubbles.lastIndex)
         this.onEdgeListener = onEdge
         this.onExitListener = onExit
@@ -185,7 +198,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
             val to = target?.let { t ->
                 bubbleRects.getOrNull(index)?.let { t.sourceToViewRect(it.scaledToPx()) }
             }
-            if (to != null && extractedBitmaps[index] != null) {
+            if (to != null && extractedCutouts[index] != null) {
                 exitTo = to
                 exitAnimStart = SystemClock.uptimeMillis()
                 exiting = true
@@ -212,8 +225,8 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         currentPage = null
         rawBubbles = emptyList()
         bubbleRects = emptyList()
-        extractedBitmaps.values.forEach { it?.recycle() }
-        extractedBitmaps.clear()
+        extractedCutouts.values.forEach { it?.bitmap?.recycle() }
+        extractedCutouts.clear()
         onEdgeListener = null
         onExitListener = null
         hint = null
@@ -277,44 +290,44 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     )
 
     private fun requestExtraction(idx: Int) {
-        if (extractedBitmaps.containsKey(idx)) return
+        if (extractedCutouts.containsKey(idx)) return
         val p = currentPage ?: return
         val bubble = rawBubbles.getOrNull(idx) ?: return
         val t = target
 
         extractJob?.cancel()
         extractJob = extractScope.launch {
-            val bmp = extractBubbleBitmap(p, bubble, t)
+            val cutout = extractCutout(p, bubble, t)
             withContext(Dispatchers.Main) {
-                extractedBitmaps[idx] = bmp
+                extractedCutouts[idx] = cutout
                 invalidate()
             }
         }
     }
 
     private fun prefetchExtraction(idx: Int) {
-        if (extractedBitmaps.containsKey(idx)) return
+        if (extractedCutouts.containsKey(idx)) return
         val p = currentPage ?: return
         val bubble = rawBubbles.getOrNull(idx) ?: return
         val t = target
 
         prefetchJob?.cancel()
         prefetchJob = extractScope.launch {
-            val bmp = extractBubbleBitmap(p, bubble, t)
+            val cutout = extractCutout(p, bubble, t)
             withContext(Dispatchers.Main) {
-                if (isActive && !extractedBitmaps.containsKey(idx)) {
-                    extractedBitmaps[idx] = bmp
+                if (isActive && !extractedCutouts.containsKey(idx)) {
+                    extractedCutouts[idx] = cutout
                 } else {
-                    bmp?.recycle()
+                    cutout?.bitmap?.recycle()
                 }
             }
         }
     }
 
     /** Bubble rects are normalised; [BubbleExtractor] takes them as-is, the crop fallback needs px. */
-    private fun extractBubbleBitmap(p: ReaderPage, bubble: Bubble, t: ReaderPageImageView?): Bitmap? =
+    private fun extractCutout(p: ReaderPage, bubble: Bubble, t: ReaderPageImageView?): BubbleCutout? =
         BubbleExtractor.extractBubble(p, bubble, sourceSize.takeIf { it.width > 0 && it.height > 0 })
-            ?: t?.cropSourceRect(bubble.rect.scaledToPx())
+            ?: t?.cropSourceRect(bubble.rect.scaledToPx())?.let { BubbleCutout(it) }
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
@@ -340,6 +353,22 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         a.bottom + (b.bottom - a.bottom) * f,
     )
 
+    /** Strokes the live vector outline (if any) then the shaped bitmap into [rect] at [alpha] (0..255). */
+    private fun drawCutout(canvas: Canvas, cutout: BubbleCutout, rect: RectF, alpha: Int) {
+        val path = cutout.outline
+        if (path != null && cutout.outlineFraction > 0f) {
+            outlineMatrix.setRectToRect(unitRect, rect, Matrix.ScaleToFit.FILL)
+            path.transform(outlineMatrix, outlinePath)
+            outlinePaint.alpha = alpha
+            outlinePaint.strokeWidth = cutout.outlineFraction * minOf(rect.width(), rect.height()) * 2f
+            canvas.drawPath(outlinePath, outlinePaint)
+            outlinePaint.alpha = 255
+        }
+        bitmapPaint.alpha = alpha
+        canvas.drawBitmap(cutout.bitmap, null, rect, bitmapPaint)
+        bitmapPaint.alpha = 255
+    }
+
     override fun onDraw(canvas: Canvas) {
         if (!isActive) return
 
@@ -358,28 +387,33 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
             }
 
             // Draw centered floating extracted bubble maximized on screen
-            val bmp = extractedBitmaps[index]
-            if (bmp != null && bmp.width > 0 && bmp.height > 0) {
+            val cutout = extractedCutouts[index]
+            val bmp = cutout?.bitmap
+            if (cutout != null && bmp != null && bmp.width > 0 && bmp.height > 0) {
                 val maxW = width * 0.92f
                 val maxH = height * 0.85f
                 val scale = minOf(maxW / bmp.width, maxH / bmp.height, 4.0f).coerceAtLeast(1.0f)
                 val drawW = bmp.width * scale
                 val drawH = bmp.height * scale
-                val drawL = (width - drawW) / 2f
-                val drawT = (height - drawH) / 2f
+                // Tail-aware framing: put the bubble *body* centre on the screen centre, kept on-screen.
+                val offX = cutout.bodyOffsetX.coerceIn(-0.12f, 0.12f)
+                val offY = cutout.bodyOffsetY.coerceIn(-0.12f, 0.12f)
+                val drawL = ((width - drawW) / 2f - offX * drawW).coerceIn(0f, (width - drawW).coerceAtLeast(0f))
+                val drawT = ((height - drawH) / 2f - offY * drawH).coerceIn(0f, (height - drawH).coerceAtLeast(0f))
                 val finalRect = RectF(drawL, drawT, drawL + drawW, drawT + drawH)
 
-                // The bitmap is already cut to the bubble shape (transparent around it): draw it
-                // straight onto the backdrop, no card behind it.
-                val exitTo = exitTo
+                val exitToRect = exitTo
                 val enterFrom = enterAnimFrom
                 when {
                     exiting -> {
-                        if (exitTo != null) {
+                        if (exitToRect != null) {
                             val e = exitFrac * exitFrac // ease-in: accelerate back toward the page
-                            bitmapPaint.alpha = ((1f - exitFrac) * 255f).toInt().coerceIn(0, 255)
-                            canvas.drawBitmap(bmp, null, lerpRect(finalRect, exitTo, e), bitmapPaint)
-                            bitmapPaint.alpha = 255
+                            drawCutout(
+                                canvas,
+                                cutout,
+                                lerpRect(finalRect, exitToRect, e),
+                                ((1f - exitFrac) * 255f).toInt().coerceIn(0, 255),
+                            )
                         }
                         if (exitFrac >= 1f) post { teardown() } else postInvalidateOnAnimation()
                         return
@@ -389,17 +423,15 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                         val lin = ((SystemClock.uptimeMillis() - enterAnimStart) / ENTER_ANIM_MS.toFloat())
                             .coerceIn(0f, 1f)
                         val f = 1f - (1f - lin) * (1f - lin) // ease-out quad
-                        bitmapPaint.alpha = (f * 255f).toInt().coerceIn(0, 255)
-                        canvas.drawBitmap(bmp, null, lerpRect(enterFrom, finalRect, f), bitmapPaint)
-                        bitmapPaint.alpha = 255
+                        drawCutout(canvas, cutout, lerpRect(enterFrom, finalRect, f), (f * 255f).toInt().coerceIn(0, 255))
                         if (lin < 1f) postInvalidateOnAnimation() else enterAnimFrom = null
                     }
-                    else -> canvas.drawBitmap(bmp, null, finalRect, bitmapPaint)
+                    else -> drawCutout(canvas, cutout, finalRect, 255)
                 }
             } else if (exiting) {
                 post { teardown() }
                 return
-            } else if (!extractedBitmaps.containsKey(index)) {
+            } else if (!extractedCutouts.containsKey(index)) {
                 canvas.drawText("…", width / 2f, height / 2f, counterPaint)
             }
         }
