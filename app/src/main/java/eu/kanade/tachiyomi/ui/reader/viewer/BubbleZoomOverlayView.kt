@@ -194,8 +194,10 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
 
     private fun clampPan() {
         val base = baseRect ?: return
-        val maxX = (base.width() / 2f * userScale - width / 2f).coerceAtLeast(0f)
-        val maxY = (base.height() / 2f * userScale - height / 2f).coerceAtLeast(0f)
+        // Pan within the zoomed cutout, relative to its own fit size (so it works on both axes even
+        // though a bubble cutout rarely fills the screen vertically).
+        val maxX = (base.width() / 2f * (userScale - 1f)).coerceAtLeast(0f)
+        val maxY = (base.height() / 2f * (userScale - 1f)).coerceAtLeast(0f)
         userTransX = userTransX.coerceIn(-maxX, maxX)
         userTransY = userTransY.coerceIn(-maxY, maxY)
     }
