@@ -74,6 +74,11 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private var enterAnimFrom: RectF? = null
     private var enterAnimStart = 0L
 
+    /** FLOATING exit animation: the cutout shrinks + fades to [exitTo] (bubble's on-page rect) then tears down. */
+    private var exiting = false
+    private var exitAnimStart = 0L
+    private var exitTo: RectF? = null
+
     val isActive: Boolean get() = isVisible && target != null
 
     private val counterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -90,20 +95,20 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     }
     private val bitmapPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val backdropPaint = Paint().apply {
-        color = Color.argb(210, 0, 0, 0) // Dimmed 82% black backdrop
+        color = Color.argb(BACKDROP_ALPHA, 0, 0, 0) // Dimmed 82% black backdrop
     }
 
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                exit()
+                exit(animate = true)
                 return true
             }
 
             // While zoomed, a double tap must only exit (never fall through to the page's 2x zoom).
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                exit()
+                exit(animate = true)
                 return true
             }
 
@@ -139,6 +144,8 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         onExit: () -> Unit = {},
     ) {
         if (bubbles.isEmpty()) return
+        exiting = false
+        exitTo = null
         // Re-entering on a page turn: hand the previous page's zoom gestures back.
         this.target?.takeIf { it !== target }?.setGestureZoomEnabled(true)
         this.target = target
@@ -167,7 +174,32 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         focusCurrent()
     }
 
-    fun exit() {
+    /**
+     * Leaves Bubble Zoom. [animate] plays the reverse of the entry animation for a FLOATING cutout
+     * (shrinks + fades back to the bubble's on-page position) before tearing down; callers on a
+     * page-turn / viewer teardown leave it false so the exit is immediate.
+     */
+    fun exit(animate: Boolean = false) {
+        if (!isActive || exiting) return
+        if (animate && zoomStyle == ZoomStyle.FLOATING) {
+            val to = target?.let { t ->
+                bubbleRects.getOrNull(index)?.let { t.sourceToViewRect(it.scaledToPx()) }
+            }
+            if (to != null && extractedBitmaps[index] != null) {
+                exitTo = to
+                exitAnimStart = SystemClock.uptimeMillis()
+                exiting = true
+                extractJob?.cancel()
+                prefetchJob?.cancel()
+                performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                postInvalidateOnAnimation()
+                return
+            }
+        }
+        teardown()
+    }
+
+    private fun teardown() {
         if (!isActive) return
         if (zoomStyle == ZoomStyle.IN_PLACE) {
             target?.resetZoom(animate = true)
@@ -186,11 +218,14 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         onExitListener = null
         hint = null
         enterAnimFrom = null
+        exiting = false
+        exitTo = null
         isVisible = false
         cb?.invoke()
     }
 
     private fun next() {
+        if (exiting) return
         if (index < rawBubbles.lastIndex) {
             index++
             step()
@@ -200,6 +235,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     }
 
     private fun prev() {
+        if (exiting) return
         if (index > 0) {
             index--
             step()
@@ -284,21 +320,41 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         super.onDetachedFromWindow()
         extractJob?.cancel()
         prefetchJob?.cancel()
+        // If we're detached mid exit-animation the deferred teardown won't run — do it now.
+        if (exiting) teardown()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (!isActive) return false
+        // Swallow input during the exit animation so a stray tap can't re-enter / double-fire.
+        if (exiting) return true
         gestureDetector.onTouchEvent(event)
         return true
     }
+
+    /** Linear interpolation between two rects. */
+    private fun lerpRect(a: RectF, b: RectF, f: Float) = RectF(
+        a.left + (b.left - a.left) * f,
+        a.top + (b.top - a.top) * f,
+        a.right + (b.right - a.right) * f,
+        a.bottom + (b.bottom - a.bottom) * f,
+    )
 
     override fun onDraw(canvas: Canvas) {
         if (!isActive) return
 
         if (zoomStyle == ZoomStyle.FLOATING) {
+            val exitFrac = if (exiting) {
+                ((SystemClock.uptimeMillis() - exitAnimStart) / EXIT_ANIM_MS.toFloat()).coerceIn(0f, 1f)
+            } else {
+                0f
+            }
+
             if (backdropEnabled) {
-                // Draw dimmed lightbox backdrop
+                // Draw dimmed lightbox backdrop (fading out as the cutout leaves).
+                backdropPaint.alpha = (BACKDROP_ALPHA * (1f - exitFrac)).toInt().coerceIn(0, BACKDROP_ALPHA)
                 canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), backdropPaint)
+                backdropPaint.alpha = BACKDROP_ALPHA
             }
 
             // Draw centered floating extracted bubble maximized on screen
@@ -315,25 +371,34 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
 
                 // The bitmap is already cut to the bubble shape (transparent around it): draw it
                 // straight onto the backdrop, no card behind it.
-                val from = enterAnimFrom
-                if (from != null) {
-                    if (enterAnimStart == 0L) enterAnimStart = SystemClock.uptimeMillis()
-                    val lin = ((SystemClock.uptimeMillis() - enterAnimStart) / ENTER_ANIM_MS.toFloat())
-                        .coerceIn(0f, 1f)
-                    val f = 1f - (1f - lin) * (1f - lin) // ease-out quad
-                    val r = RectF(
-                        from.left + (finalRect.left - from.left) * f,
-                        from.top + (finalRect.top - from.top) * f,
-                        from.right + (finalRect.right - from.right) * f,
-                        from.bottom + (finalRect.bottom - from.bottom) * f,
-                    )
-                    bitmapPaint.alpha = (f * 255f).toInt().coerceIn(0, 255)
-                    canvas.drawBitmap(bmp, null, r, bitmapPaint)
-                    bitmapPaint.alpha = 255
-                    if (lin < 1f) postInvalidateOnAnimation() else enterAnimFrom = null
-                } else {
-                    canvas.drawBitmap(bmp, null, finalRect, bitmapPaint)
+                val exitTo = exitTo
+                val enterFrom = enterAnimFrom
+                when {
+                    exiting -> {
+                        if (exitTo != null) {
+                            val e = exitFrac * exitFrac // ease-in: accelerate back toward the page
+                            bitmapPaint.alpha = ((1f - exitFrac) * 255f).toInt().coerceIn(0, 255)
+                            canvas.drawBitmap(bmp, null, lerpRect(finalRect, exitTo, e), bitmapPaint)
+                            bitmapPaint.alpha = 255
+                        }
+                        if (exitFrac >= 1f) post { teardown() } else postInvalidateOnAnimation()
+                        return
+                    }
+                    enterFrom != null -> {
+                        if (enterAnimStart == 0L) enterAnimStart = SystemClock.uptimeMillis()
+                        val lin = ((SystemClock.uptimeMillis() - enterAnimStart) / ENTER_ANIM_MS.toFloat())
+                            .coerceIn(0f, 1f)
+                        val f = 1f - (1f - lin) * (1f - lin) // ease-out quad
+                        bitmapPaint.alpha = (f * 255f).toInt().coerceIn(0, 255)
+                        canvas.drawBitmap(bmp, null, lerpRect(enterFrom, finalRect, f), bitmapPaint)
+                        bitmapPaint.alpha = 255
+                        if (lin < 1f) postInvalidateOnAnimation() else enterAnimFrom = null
+                    }
+                    else -> canvas.drawBitmap(bmp, null, finalRect, bitmapPaint)
                 }
+            } else if (exiting) {
+                post { teardown() }
+                return
             } else if (!extractedBitmaps.containsKey(index)) {
                 canvas.drawText("…", width / 2f, height / 2f, counterPaint)
             }
@@ -357,5 +422,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private companion object {
         const val HINT_DURATION_MS = 2500L
         const val ENTER_ANIM_MS = 200L
+        const val EXIT_ANIM_MS = 160L
+        const val BACKDROP_ALPHA = 210
     }
 }

@@ -238,7 +238,7 @@ class ReaderActivity : BaseActivity() {
         // KMK --> Bubble Zoom: back exits the mode instead of closing the reader
         onBackPressedDispatcher.addCallback(this) {
             if (binding.bubbleZoomOverlay.isActive) {
-                binding.bubbleZoomOverlay.exit()
+                binding.bubbleZoomOverlay.exit(animate = true)
             } else {
                 isEnabled = false
                 onBackPressedDispatcher.onBackPressed()
