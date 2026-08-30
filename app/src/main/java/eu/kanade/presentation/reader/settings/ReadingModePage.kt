@@ -7,8 +7,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalContext
+import eu.kanade.domain.manga.model.bubbleZoomOverride
 import eu.kanade.domain.manga.model.readerOrientation
 import eu.kanade.domain.manga.model.readingMode
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.setting.BubbleZoomOverride
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderSettingsScreenModel
@@ -51,6 +55,23 @@ internal fun ReadingModePage(screenModel: ReaderSettingsScreenModel) {
             )
         }
     }
+
+    // KMK -->
+    val context = LocalContext.current
+    val bubbleZoomSupported = remember { BubbleDetection.isSupported(context) }
+    if (bubbleZoomSupported) {
+        val bubbleZoom = remember(manga) { BubbleZoomOverride.fromPreference(manga?.bubbleZoomOverride?.toInt()) }
+        SettingsChipRow(KMR.strings.pref_bubble_zoom_enable) {
+            BubbleZoomOverride.entries.map {
+                FilterChip(
+                    selected = it == bubbleZoom,
+                    onClick = { screenModel.onChangeBubbleZoom(it) },
+                    label = { Text(stringResource(it.stringRes)) },
+                )
+            }
+        }
+    }
+    // KMK <--
 
     val viewer by screenModel.viewerFlow.collectAsState()
     if (viewer is WebtoonViewer) {

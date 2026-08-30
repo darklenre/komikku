@@ -3,6 +3,8 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
+import android.os.PowerManager
 import android.os.Process
 import android.util.LruCache
 import androidx.core.content.getSystemService
@@ -118,6 +120,9 @@ object BubbleDetection {
         }
         if (method != "sam") return
         val appContext = context.applicationContext
+        // The interactive cutout still runs on demand; only the eager background encode is skipped
+        // while the device is saving power or thermally throttled.
+        if (deviceUnderStress(appContext)) return
 
         val handle = PrewarmHandle(key)
         synchronized(prewarmHandles) {
@@ -135,6 +140,14 @@ object BubbleDetection {
                 synchronized(prewarmHandles) { prewarmHandles.remove(handle) }
             }
         }
+    }
+
+    /** True when a background SAM encode would be antisocial: power-save mode or thermal throttling. */
+    private fun deviceUnderStress(context: Context): Boolean {
+        val pm = context.getSystemService<PowerManager>() ?: return false
+        if (pm.isPowerSaveMode) return true
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+            pm.currentThermalStatus >= PowerManager.THERMAL_STATUS_MODERATE
     }
 
     /**

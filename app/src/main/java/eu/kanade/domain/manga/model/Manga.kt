@@ -3,6 +3,7 @@ package eu.kanade.domain.manga.model
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.tachiyomi.data.cache.CoverCache
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.ui.reader.setting.BubbleZoomOverride
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
 import mihon.core.archive.CbzCrypto
@@ -20,6 +21,15 @@ val Manga.readingMode: Long
 
 val Manga.readerOrientation: Long
     get() = viewerFlags and ReaderOrientation.MASK.toLong()
+
+// KMK -->
+val Manga.bubbleZoomOverride: Long
+    get() = viewerFlags and BubbleZoomOverride.MASK.toLong()
+
+/** Per-manga Bubble Zoom override resolved to null = follow the global setting, true/false = forced. */
+val Manga.bubbleZoomForced: Boolean?
+    get() = BubbleZoomOverride.fromPreference(bubbleZoomOverride.toInt()).forced
+// KMK <--
 
 val Manga.downloadedFilter: TriState
     get() {

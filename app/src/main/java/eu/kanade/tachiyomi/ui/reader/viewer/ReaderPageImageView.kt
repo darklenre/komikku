@@ -279,6 +279,14 @@ open class ReaderPageImageView @JvmOverloads constructor(
     fun viewToSourceCoord(viewX: Float, viewY: Float): PointF? =
         ssivIfReady?.viewToSourceCoord(viewX, viewY)
 
+    /** Map a source-image rect to this view's coordinates, or null if no ready image backs the view. */
+    fun sourceToViewRect(srcRect: RectF): RectF? {
+        val ssiv = ssivIfReady ?: return null
+        val p1 = ssiv.sourceToViewCoord(srcRect.left, srcRect.top) ?: return null
+        val p2 = ssiv.sourceToViewCoord(srcRect.right, srcRect.bottom) ?: return null
+        return RectF(minOf(p1.x, p2.x), minOf(p1.y, p2.y), maxOf(p1.x, p2.x), maxOf(p1.y, p2.y))
+    }
+
     /** Render and crop a high-resolution sub-region of the page in source coordinates. */
     fun cropSourceRect(srcRect: RectF): Bitmap? {
         val view = pageView ?: return null

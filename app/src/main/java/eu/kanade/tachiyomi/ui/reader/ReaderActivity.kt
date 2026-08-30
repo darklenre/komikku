@@ -349,6 +349,9 @@ class ReaderActivity : BaseActivity() {
                     readerState = viewModel.state,
                     onChangeReadingMode = viewModel::setMangaReadingMode,
                     onChangeOrientation = viewModel::setMangaOrientationType,
+                    // KMK -->
+                    onChangeBubbleZoom = viewModel::setMangaBubbleZoomOverride,
+                    // KMK <--
                 )
             }
 
@@ -709,6 +712,12 @@ class ReaderActivity : BaseActivity() {
         val readerBottomButtons by readerPreferences.readerBottomButtons().changes().map { it.toImmutableSet() }
             .collectAsState(persistentSetOf())
         val dualPageSplitPaged by readerPreferences.dualPageSplitPaged().collectAsState()
+        // KMK -->
+        val bubbleZoomSupported = remember {
+            eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection.isSupported(this)
+        }
+        val bubbleZoomEnabled by readerPreferences.bubbleZoom().collectAsState()
+        // KMK <--
 
         val forceHorizontalSeekbar by readerPreferences.forceHorizontalSeekbar().collectAsState()
         val landscapeVerticalSeekbar by readerPreferences.landscapeVerticalSeekbar().collectAsState()
@@ -801,6 +810,19 @@ class ReaderActivity : BaseActivity() {
             },
             onClickShiftPage = ::shiftDoublePages,
             // SY <--
+            // KMK -->
+            bubbleZoomEnabled = bubbleZoomEnabled,
+            onClickBubbleZoom = if (bubbleZoomSupported) {
+                {
+                    val enabled = !readerPreferences.bubbleZoom().get()
+                    readerPreferences.bubbleZoom().set(enabled)
+                    menuToggleToast?.cancel()
+                    menuToggleToast = toast(if (enabled) MR.strings.on else MR.strings.off)
+                }
+            } else {
+                null
+            },
+            // KMK <--
         )
     }
 
@@ -1009,6 +1031,10 @@ class ReaderActivity : BaseActivity() {
             binding.viewerContainer.removeAllViews()
         }
         viewModel.onViewerLoaded(newViewer)
+        // KMK: apply the per-manga Bubble Zoom override (null => follow the global setting)
+        val bubbleZoomOverride = viewModel.getMangaBubbleZoomOverride()
+        (newViewer as? PagerViewer)?.config?.bubbleZoomMangaOverride = bubbleZoomOverride
+        (newViewer as? WebtoonViewer)?.config?.bubbleZoomMangaOverride = bubbleZoomOverride
         updateViewerInset(readerPreferences.fullscreen().get(), readerPreferences.drawUnderCutout().get())
         binding.viewerContainer.addView(newViewer.getView())
 
