@@ -28,7 +28,7 @@ Architettura corrente completa in `piano §1`. In breve:
 - **Config**: 9 pref `bubble_zoom_*` (tabella in `piano §1.4`) + override per-serie in `viewerFlags` bit 6-7 (`BubbleZoomOverride`) + `ReaderBottomButton.BubbleZoom`.
 - Gate device: `RAM ≥ 2 GB` + `SamRefiner.disabledForSlowDevice` (2 encode > 9 s). `releaseDetector()` su `onTrimMemory`/`onDestroy`.
 
-**Restano**: **Fase 4** (encoder SAM più veloce → **work order Antigravity in §3** / cache disco = Claude, dopo 4.1) · **Fase 5** (OCR/TTS/traduzione — probabile Tesseract4Android + TTS nativo, delega leggera).
+**Restano**: **Fase 4** (encoder SAM più veloce → **work order Antigravity in §3**; cache disco **scartata**, decisione utente) · **Fase 5** (OCR/TTS/traduzione — probabile Tesseract4Android + TTS nativo, delega leggera).
 
 **Da validare a runtime**: tiling su webtoon reale (memoria/latenza/doppioni ai bordi tile) — vedi `piano §3`.
 
@@ -62,9 +62,9 @@ Mettere i `.tflite` in `app/src/main/assets/models/` (già `noCompress "tflite"`
 
 Una riga in `antigravity-com.md`: quale candidato conviene (latenza × qualità), e se richiede modifiche al decoder o alla normalizzazione. Poi Claude fa lo swap in `SamRefiner` (che sta per essere parametrizzato: `INPUT`, dim embedding, `MASK`, `PIX_MEAN/STD` da campo invece che costanti).
 
-### 3.4 — Fuori scope per ora
+### 3.4 — Nota
 
-4.2 (cache su disco degli embedding/cutout) è tutto Kotlin e dipende dall'esito di 3.1 — non toccarla.
+La cache su disco di embedding/cutout (ex-4.2) è **scartata** (decisione utente 30 ago) — non è più nel piano.
 
 ---
 
@@ -95,5 +95,6 @@ adb -s $D logcat -v time | grep -E "TfliteBubbleDetector|SamRefiner|BubbleExtrac
 - **30 ago — Claude**: **Fase 0** (roadmap piano §2). Tolti tutti i log INFO diagnostici (restano WARN/ERROR). `ModelIntegrity.kt` (nuovo): mmap + SHA-256 dei 3 modelli al load, condiviso da `TfliteBubbleDetector`/`SamRefiner` — mismatch = init fallita pulita. `SamRefiner.disabledForSlowDevice`: 2 encode interattivi > 9 s → fallback rettangolo per la sessione. `BubbleDetection.releaseDetector()` chiamato da `ReaderActivity.onTrimMemory(≥ RUNNING_LOW)` + `onDestroy`. `BubbleDetection.prewarmSam`: solo i 2 warmup più recenti restano vivi (`prewarmHandles`), gli altri cancellati + saltati via `stillWanted`. **22 unit test** (`app/src/test/.../bubble/`): `letterboxOf`/`iou`/`decodeDetsNormalized`+NMS/`orderIndices`/`traceContour`/`chaikinClosed`; refactor: `decodeDetections` core puro + wrapper, `BubbleReadingOrder.sort` → `orderIndices(List<Box>)`. `compileReleaseKotlin` + `testReleaseUnitTest` + `spotlessKotlinCheck` ✅. Commit+push.
 - **30 ago — Claude**: **Fase 2 + 3** (roadmap piano §2). **3.2** slider `bubble_zoom_confidence` (`BubbleDetector.detect(bitmap, conf)`, cache clear al cambio). **3.3** `BubbleHit.hitTest` a ellisse inscritta + tie-break area. **3.4** tap-to-add dietro `bubble_zoom_tap_anywhere` (off). **2.1** `BubbleCutout` — outline non più bakato, `Path` unità stroke-ato live dall'overlay (`drawCutout` + Matrix). **2.3** `bodyCentre` (erosione silhouette) → framing sul corpo, non sul centro geometrico. **2.2** `ScaleGestureDetector` nell'overlay: pinch/pan del cutout (userScale 1..5, focal anchor, pan clamp; double-tap = reset-a-fit se zoomato). **3.1** tiling webtoon: `WebtoonPageHolder.decodeForDetection` affetta le strisce > width·2.2 in tile a larghezza piena (`BitmapRegionDecoder`, sample sul width), `BubbleDetection.enqueueTiled`/`detectTiled` rimappa in 0..1 di pagina + NMS globale. 8 unit test nuovi (`BubbleHitTest`, 37 tot). compile+test+spotless ✅, APK su Fold8. Commit `1f2d46221b` (3.x) + `f681a76677` (2.1/2.3) + `2f0365d686` (2.2/3.1).
 - **30 ago — Claude**: fix `clampPan` — il pan verticale non funzionava (limite rispetto a metà viewport; una nuvoletta non riempie lo schermo in verticale). Ora limite = `metàLatoFit·(userScale-1)` simmetrico. Commit `5e0d9f8895`. Utente: "sembra funzionare". Piano §1 + com §2 riscritti allo stato Fasi 0-3 fatte.
-- **30 ago — Claude**: aperto **work order §3 per Antigravity** (Fase 4.1 — encoder SAM: EdgeSAM / NanoSAM / MobileSAM int8 / re-export @512, con bench Fold8 + qualità maschera). Prossimo passo Claude: parametrizzare `SamRefiner` per lo swap drop-in. 4.2 (cache disco) in stand-by fino ai numeri.
+- **30 ago — Claude**: aperto **work order §3 per Antigravity** (Fase 4.1 — encoder SAM: EdgeSAM / NanoSAM / MobileSAM int8 / re-export @512, con bench Fold8 + qualità maschera). Prossimo passo Claude: parametrizzare `SamRefiner` per lo swap drop-in quando arriva la scheda I/O.
+- **30 ago — decisione utente**: cache su disco (ex-4.2) **scartata**, non si implementa. Fase 4 = solo encoder più veloce.
 - **30 ago — Claude**: **Fase 1**. Animazione ingresso+uscita cutout FLOATING (ingresso 200 ms ease-out/fade-in, uscita 160 ms ease-in/fade-out + backdrop; `exit(animate=true)` da tap/double-tap/back, immediato su page-turn; `BubbleZoomOverlayView` + `ReaderPageImageView.sourceToViewRect`). Override per-serie via `viewerFlags` bit 6-7 (`BubbleZoomOverride`, `SetMangaViewerFlags.awaitSetBubbleZoom`, `Manga.bubbleZoomForced`), `ViewerConfig.bubbleZoomEnabled` ora `override ?: global`, applicato in `ReaderActivity.updateViewer()`, chip row in `ReadingModePage` (gated `isSupported`). Quick toggle `ReaderBottomButton.BubbleZoom` → bottom bar (`ReaderBottomBar`/`ReaderAppBars`/`ReaderActivity`), togglea `bubble_zoom` + toast. `prewarmSam` salta su power-save/thermal. 13 file + `BubbleZoomOverride.kt`. `compileReleaseKotlin` + test + spotless ✅. Commit+push.

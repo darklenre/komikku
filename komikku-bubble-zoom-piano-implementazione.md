@@ -121,14 +121,13 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 
 *I ~2 s/pagina dell'encoder MobileSAM sul Fold8 sono il vero collo di bottiglia UX. Mitigazioni già in piedi: warmup di background, barra, cue "…", gate device adattivo.*
 
-- [ ] **Encoder più veloce**: valutare **EdgeSAM** (RepViT, ONNX ufficiali) / **SAM2-tiny** / re-export encoder a **input 512** (dimezza il compute) / int8 sull'encoder. Serve conversione modelli → coinvolge Antigravity; il decoder resta com'è.
-- [ ] **Cache su disco** di embedding (o cutout finali) per hash-pagina → riapertura di un capitolo già letto = cutout istantaneo. Dipende da un **hash-pagina stabile** (oggi la chiave è `chapterId:index`, non il contenuto).
+- [ ] **Encoder più veloce**: valutare **EdgeSAM** (RepViT, ONNX ufficiali) / **NanoSAM** (ResNet18) / re-export encoder a **input 512** (dimezza il compute) / int8 sull'encoder. Serve conversione modelli → **work order Antigravity in `claude-com.md` §3**; il decoder resta com'è salvo quanto emerga dalla scheda I/O. Poi Claude parametrizza `SamRefiner` e fa lo swap.
+
+*(Cache su disco degli embedding/cutout: **scartata** — decisione utente, non si implementa.)*
 
 ### Fase 5 — OCR / TTS / traduzione *(residua)*
 
-- [ ] Feature a sé che riusa la pipeline detection + cutout: OCR del testo ritagliato → read-aloud (accessibilità) e/o overlay tradotto. Scope grande (modello OCR da bundlare/scaricare per JP/KO/EN, TTS/traduzione), ma il pezzo difficile — isolare la nuvoletta — è fatto. Indipendente dalle altre fasi.
-
-**Dipendenze rimaste**: cache disco (4.2) ⟵ hash-pagina stabile · OCR (Fase 5) indipendente.
+- [ ] Feature a sé che riusa la pipeline detection + cutout: OCR del testo ritagliato → read-aloud (accessibilità) e/o overlay tradotto. Scope grande (modello OCR da bundlare/scaricare per JP/KO/EN, TTS/traduzione), ma il pezzo difficile — isolare la nuvoletta — è fatto. Indipendente dalle altre fasi. Direzione probabile: Tesseract4Android (FOSS, `jpn_vert`) + `TextToSpeech` nativo; traduzione rimandata.
 
 ---
 
