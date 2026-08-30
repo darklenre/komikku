@@ -3,6 +3,9 @@ package eu.kanade.tachiyomi.ui.reader.viewer.webtoon
 import android.content.res.Resources
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.BitmapRegionDecoder
+import android.graphics.Rect
+import android.os.Build
 import android.view.LayoutInflater
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -39,6 +42,8 @@ import tachiyomi.core.common.util.system.ImageUtil
 import tachiyomi.core.common.util.system.logcat
 import tachiyomi.i18n.MR
 import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Holder of the webtoon reader for a single page of a chapter.
@@ -199,8 +204,8 @@ class WebtoonPageHolder(
         val streamFn = page?.stream ?: return
 
         val currentPage = page ?: return
-        // KMK: bitmap for detection, decoded from the FINAL image (post rotate/split/crop)
-        var detectionBitmap: Bitmap? = null
+        // KMK: detection input, decoded from the FINAL image (post rotate/split/crop)
+        var detectionInput: DetectionInput? = null
         val wantBubbleDetection = viewer.config.bubbleZoomEnabled &&
             BubbleDetection.isSupported(context) &&
             BubbleDetection.cached(bubbleKeyFor(currentPage)) == null
@@ -210,7 +215,7 @@ class WebtoonPageHolder(
                 val source = streamFn().use { process(Buffer().readFrom(it)) }
                 val isAnimated = ImageUtil.isAnimatedAndSupported(source)
                 if (!isAnimated && wantBubbleDetection) {
-                    detectionBitmap = decodeForDetection(source.peek())
+                    detectionInput = decodeForDetection(source.peek())
                 }
                 Pair(source, isAnimated)
             }
@@ -231,15 +236,17 @@ class WebtoonPageHolder(
                 removeErrorLayout()
             }
             // KMK --> Bubble Zoom: run detection on the final page image in the background
-            detectionBitmap?.let { bitmap ->
-                BubbleDetection.enqueue(context, bubbleKeyFor(currentPage), bitmap)
+            when (val input = detectionInput) {
+                is DetectionInput.Single -> BubbleDetection.enqueue(context, bubbleKeyFor(currentPage), input.bitmap)
+                is DetectionInput.Tiled -> BubbleDetection.enqueueTiled(context, bubbleKeyFor(currentPage), input.tiles)
+                null -> Unit
             }
             if (viewer.config.bubbleZoomEnabled) {
                 BubbleDetection.prewarmSam(context, bubbleKeyFor(currentPage), streamFn)
             }
             // KMK <--
         } catch (e: Throwable) {
-            detectionBitmap?.recycle()
+            detectionInput?.recycle()
             if (e is kotlinx.coroutines.CancellationException) throw e
             logcat(LogPriority.ERROR, e)
             withUIContext {
@@ -249,20 +256,81 @@ class WebtoonPageHolder(
     }
 
     // KMK --> Bubble Zoom
-    /** Decodes [source] (a peek of the final page image) downscaled to at most [DETECTION_MAX_SIDE]. */
-    private fun decodeForDetection(source: BufferedSource): Bitmap? = try {
+    /** Either one downscaled bitmap, or (for a tall strip) overlapping full-width horizontal tiles. */
+    private sealed interface DetectionInput {
+        class Single(val bitmap: Bitmap) : DetectionInput
+        class Tiled(val tiles: List<BubbleDetection.DetectionTile>) : DetectionInput
+
+        fun recycle() = when (this) {
+            is Single -> bitmap.recycle()
+            is Tiled -> tiles.forEach { it.bitmap.recycle() }
+        }
+    }
+
+    /**
+     * Builds the detection input from [source] (a peek of the final page image). A normal page is one
+     * bitmap downscaled so its long side is <= [DETECTION_MAX_SIDE]. A tall webtoon strip would lose
+     * its width to that clamp (a 1000x15000 page → ~68 px wide), so it is instead sliced into
+     * overlapping full-width tiles decoded with a *width*-based sample factor.
+     */
+    private fun decodeForDetection(source: BufferedSource): DetectionInput? = try {
         val bytes = source.readByteArray()
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val longSide = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = max(1, longSide / DETECTION_MAX_SIDE)
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+        val w = bounds.outWidth
+        val h = bounds.outHeight
+        when {
+            w <= 0 || h <= 0 -> null
+            h <= w * TILE_TRIGGER_ASPECT -> {
+                val opts = BitmapFactory.Options().apply {
+                    inSampleSize = max(1, max(w, h) / DETECTION_MAX_SIDE)
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.let { DetectionInput.Single(it) }
+            }
+            else -> decodeTiles(bytes, w, h)
         }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
     } catch (e: Throwable) {
         logcat(LogPriority.WARN, e) { "Bubble detection decode failed" }
         null
+    }
+
+    private fun decodeTiles(bytes: ByteArray, w: Int, h: Int): DetectionInput? {
+        val sample = max(1, w / DETECTION_MAX_SIDE)
+        val decW = w / sample
+        var tileSrcH = (decW * TILE_ASPECT).roundToInt() * sample
+        val overlap = (tileSrcH * TILE_OVERLAP).roundToInt()
+        var step = (tileSrcH - overlap).coerceAtLeast(sample)
+        // Cap the tile count on very long pages by growing each tile.
+        if ((h + step - 1) / step > MAX_TILES) {
+            step = (h + MAX_TILES - 1) / MAX_TILES
+            tileSrcH = step + overlap
+        }
+        @Suppress("DEPRECATION")
+        val decoder = (
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size)
+            } else {
+                BitmapRegionDecoder.newInstance(bytes, 0, bytes.size, false)
+            }
+            ) ?: return null
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val tiles = ArrayList<BubbleDetection.DetectionTile>()
+        var y = 0
+        while (y < h) {
+            val bottom = min(y + tileSrcH, h)
+            val tile = runCatching { decoder.decodeRegion(Rect(0, y, w, bottom), opts) }.getOrNull()
+            if (tile != null) {
+                tiles += BubbleDetection.DetectionTile(tile, y.toFloat() / h, bottom.toFloat() / h)
+            }
+            if (bottom >= h) break
+            y += step
+        }
+        decoder.recycle()
+        return if (tiles.isEmpty()) null else DetectionInput.Tiled(tiles)
     }
     // KMK <--
 
@@ -373,3 +441,9 @@ class WebtoonPageHolder(
 
 // KMK: longest side (px) the page is downscaled to before running bubble detection
 private const val DETECTION_MAX_SIDE = 1024
+
+// KMK: a page taller than width * this is tiled for detection instead of downscaled whole
+private const val TILE_TRIGGER_ASPECT = 2.2f
+private const val TILE_ASPECT = 1.3f // decoded tile height ≈ width * this
+private const val TILE_OVERLAP = 0.16f // fraction of tile height shared with the next tile
+private const val MAX_TILES = 12

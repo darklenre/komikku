@@ -14,6 +14,7 @@ import android.util.Size
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import androidx.core.view.isVisible
 import eu.kanade.tachiyomi.ui.reader.bubble.Bubble
@@ -111,6 +112,22 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private val outlinePath = Path()
     private val unitRect = RectF(0f, 0f, 1f, 1f)
 
+    // FLOATING pinch-zoom / pan of the current cutout. userScale == 1 && no translation == "fit".
+    private var userScale = 1f
+    private var userTransX = 0f
+    private var userTransY = 0f
+    /** The fit (unzoomed) draw rect from the last [onDraw]; pinch focal math + pan clamping need it. */
+    private var baseRect: RectF? = null
+
+    private val zoomed: Boolean
+        get() = userScale > 1.001f || userTransX != 0f || userTransY != 0f
+
+    private fun resetZoom() {
+        userScale = 1f
+        userTransX = 0f
+        userTransY = 0f
+    }
+
     private val gestureDetector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
@@ -119,9 +136,23 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 return true
             }
 
-            // While zoomed, a double tap must only exit (never fall through to the page's 2x zoom).
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                exit(animate = true)
+                // Zoomed in → double tap snaps back to fit; otherwise it exits.
+                if (zoomed) {
+                    resetZoom()
+                    invalidate()
+                } else {
+                    exit(animate = true)
+                }
+                return true
+            }
+
+            override fun onScroll(e1: MotionEvent?, e2: MotionEvent, distanceX: Float, distanceY: Float): Boolean {
+                if (!zoomed || scaleDetector.isInProgress) return false
+                userTransX -= distanceX
+                userTransY -= distanceY
+                clampPan()
+                invalidate()
                 return true
             }
 
@@ -131,12 +162,43 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 velocityX: Float,
                 velocityY: Float,
             ): Boolean {
+                // While zoomed a fling is a pan, not a bubble change.
+                if (zoomed) return true
                 val forward = if (abs(velocityX) >= abs(velocityY)) velocityX < 0 else velocityY < 0
                 if (forward) next() else prev()
                 return true
             }
         },
     )
+
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val base = baseRect ?: return false
+                val old = userScale
+                val next = (old * detector.scaleFactor).coerceIn(1f, MAX_USER_SCALE)
+                if (next == old) return true
+                // Keep the pinch focal point anchored while scaling.
+                val fx = detector.focusX - base.centerX() - userTransX
+                val fy = detector.focusY - base.centerY() - userTransY
+                userScale = next
+                userTransX -= fx * (next / old - 1f)
+                userTransY -= fy * (next / old - 1f)
+                clampPan()
+                invalidate()
+                return true
+            }
+        },
+    )
+
+    private fun clampPan() {
+        val base = baseRect ?: return
+        val maxX = (base.width() / 2f * userScale - width / 2f).coerceAtLeast(0f)
+        val maxY = (base.height() / 2f * userScale - height / 2f).coerceAtLeast(0f)
+        userTransX = userTransX.coerceIn(-maxX, maxX)
+        userTransY = userTransY.coerceIn(-maxY, maxY)
+    }
 
     init {
         setWillNotDraw(false)
@@ -159,6 +221,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         if (bubbles.isEmpty()) return
         exiting = false
         exitTo = null
+        resetZoom()
         // Re-entering on a page turn: hand the previous page's zoom gestures back.
         this.target?.takeIf { it !== target }?.setGestureZoomEnabled(true)
         this.target = target
@@ -194,6 +257,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
      */
     fun exit(animate: Boolean = false) {
         if (!isActive || exiting) return
+        resetZoom()
         if (animate && zoomStyle == ZoomStyle.FLOATING) {
             val to = target?.let { t ->
                 bubbleRects.getOrNull(index)?.let { t.sourceToViewRect(it.scaledToPx()) }
@@ -233,6 +297,8 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         enterAnimFrom = null
         exiting = false
         exitTo = null
+        baseRect = null
+        resetZoom()
         isVisible = false
         cb?.invoke()
     }
@@ -265,6 +331,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private fun focusCurrent() {
         val t = target ?: return
         val rect = bubbleRects.getOrNull(index) ?: return
+        resetZoom()
 
         if (zoomStyle == ZoomStyle.IN_PLACE) {
             val px = rect.scaledToPx()
@@ -341,8 +408,19 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         if (!isActive) return false
         // Swallow input during the exit animation so a stray tap can't re-enter / double-fire.
         if (exiting) return true
+        if (zoomStyle == ZoomStyle.FLOATING) scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
         return true
+    }
+
+    /** [base] with the current user pinch-zoom / pan applied. */
+    private fun zoomedRect(base: RectF): RectF {
+        if (!zoomed) return base
+        val hw = base.width() / 2f * userScale
+        val hh = base.height() / 2f * userScale
+        val cx = base.centerX() + userTransX
+        val cy = base.centerY() + userTransY
+        return RectF(cx - hw, cy - hh, cx + hw, cy + hh)
     }
 
     /** Linear interpolation between two rects. */
@@ -401,6 +479,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 val drawL = ((width - drawW) / 2f - offX * drawW).coerceIn(0f, (width - drawW).coerceAtLeast(0f))
                 val drawT = ((height - drawH) / 2f - offY * drawH).coerceIn(0f, (height - drawH).coerceAtLeast(0f))
                 val finalRect = RectF(drawL, drawT, drawL + drawW, drawT + drawH)
+                baseRect = finalRect
 
                 val exitToRect = exitTo
                 val enterFrom = enterAnimFrom
@@ -426,7 +505,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                         drawCutout(canvas, cutout, lerpRect(enterFrom, finalRect, f), (f * 255f).toInt().coerceIn(0, 255))
                         if (lin < 1f) postInvalidateOnAnimation() else enterAnimFrom = null
                     }
-                    else -> drawCutout(canvas, cutout, finalRect, 255)
+                    else -> drawCutout(canvas, cutout, zoomedRect(finalRect), 255)
                 }
             } else if (exiting) {
                 post { teardown() }
@@ -456,5 +535,6 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         const val ENTER_ANIM_MS = 200L
         const val EXIT_ANIM_MS = 160L
         const val BACKDROP_ALPHA = 210
+        const val MAX_USER_SCALE = 5f
     }
 }
