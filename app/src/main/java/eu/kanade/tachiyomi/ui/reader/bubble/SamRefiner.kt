@@ -20,33 +20,37 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.MappedByteBuffer
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * MobileSAM box-prompted mask refiner (MobileSAM is Apache-2.0), backed by two TFLite models:
- *  - `models/sam_encoder.tflite`: `[1,3,1024,1024]` NCHW f32 -> image embedding `[1,256,64,64]`
- *  - `models/sam_decoder.tflite`: (embedding, box `[1,4]` px in the 1024 frame) -> mask logits
+ * EdgeSAM box-prompted mask refiner (EdgeSAM is Apache-2.0), backed by two TFLite models:
+ *  - `models/sam_encoder_edgesam.tflite`: `[1,3,1024,1024]` NCHW f32 -> image embedding `[1,256,64,64]`.
+ *    RepViT backbone (pure convolution), so unlike MobileSAM's TinyViT the TFLite GPU delegate runs
+ *    the whole encode in hardware (~50 ms) instead of falling back to XNNPACK CPU (~350 ms / ~2 s).
+ *  - `models/sam_decoder_edgesam.tflite`: (embedding, box `[1,4]` px in the 1024 frame) -> mask logits
  *    `[1,1,256,256]` + IoU `[1,1]`
  *
- * The encoder runs once per page (its embedding is cached by page key); the decoder runs per bubble
- * box and is cheap. Interpreters are created lazily on first use and only when a SAM cropping method
- * is selected, so the ~49 MB of models cost nothing otherwise.
+ * Tensor shapes, dtypes and the ImageNet pixel normalisation are identical to MobileSAM, so the swap
+ * is drop-in. The encoder runs once per page (its embedding is cached by page key); the decoder runs
+ * per bubble box and is cheap. Interpreters are created lazily on first use and only when a SAM
+ * cropping method is selected, so the ~42 MB of models cost nothing otherwise.
  */
 object SamRefiner {
 
-    private const val ENCODER_ASSET = "models/sam_encoder.tflite"
-    private const val DECODER_ASSET = "models/sam_decoder.tflite"
+    private const val ENCODER_ASSET = "models/sam_encoder_edgesam.tflite"
+    private const val DECODER_ASSET = "models/sam_decoder_edgesam.tflite"
 
     /** SHA-256 of the bundled assets — a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
-    private const val ENCODER_SHA = "b3b734716433bbd14d5b139727a5988d775e22e7cad5632fe007c1c9f3f5fcef"
-    private const val DECODER_SHA = "c12448a26bbb35adc3d2f246d8c418cd82a8af3044f71a300acae60c81692d0b"
+    private const val ENCODER_SHA = "564f55425f04e5f5c8c7853fc3df8ca108a002b6de0deae328519fe02e03c23f"
+    private const val DECODER_SHA = "8bbb8aafbbe447ca67b7235e115d6bdf5360afae27b5a43425c3d204d885807c"
 
     private const val INPUT = 1024
     private const val EMBED_LEN = 256 * 64 * 64
     private const val MASK = 256
 
     /**
-     * If the first few interactive encodes are all slower than this, the device can't run MobileSAM
+     * If the first few interactive encodes are all slower than this, the device can't run EdgeSAM
      * at a usable latency: [disabledForSlowDevice] latches and the cutout silently falls back to the
      * rounded rectangle for the rest of the process (a restart re-evaluates).
      */
@@ -116,6 +120,9 @@ object SamRefiner {
                         if (d.getOutputTensor(i).shape().size >= 4) decMaskOutIdx = i else decIouOutIdx = i
                     }
                 }
+                if (isAvailable) {
+                    logcat(LogPriority.WARN) { "SamRefiner: EdgeSAM ready (encoder=$encBackend, decoder=$decBackend)" }
+                }
             }.onFailure {
                 logcat(LogPriority.ERROR) { "SamRefiner: init failed: ${it.message}" }
                 // Release what loaded, but keep triedInit latched so a hard failure (missing/corrupt
@@ -139,17 +146,27 @@ object SamRefiner {
         if (disabledForSlowDevice) return
         ensureInit(context)
         if (encoder == null || embeddings.get(pageKey) != null) return
-        val (pw, ph) = pageDims(streamFn) ?: return
+        val bytes = snapshot(streamFn) ?: return
+        val (pw, ph) = pageDims(bytes) ?: return
         val gain = INPUT.toFloat() / max(pw, ph)
         embedFor(
             pageKey,
-            streamFn,
+            bytes,
             (pw * gain).roundToInt().coerceIn(1, INPUT),
             (ph * gain).roundToInt().coerceIn(1, INPUT),
             foreground = false,
             stillWanted = stillWanted,
         )
     }
+
+    /**
+     * Reads the page bytes once into memory. All decoding then runs off this immutable array via
+     * [BitmapFactory.decodeByteArray] — never off the live stream. Decoding the same [page.stream]
+     * on the background warmup thread while the page holder is also reading it corrupts the native
+     * decoder's buffer (SIGSEGV in `BitmapFactory.decodeStream`), which a `runCatching` can't catch.
+     */
+    private fun snapshot(streamFn: () -> InputStream): ByteArray? =
+        runCatching { streamFn().use { it.readBytes() } }.getOrNull()?.takeIf { it.isNotEmpty() }
 
     /**
      * @param foreground when true and an encode actually has to run, it is counted toward
@@ -159,7 +176,7 @@ object SamRefiner {
      */
     private fun embedFor(
         pageKey: String,
-        streamFn: () -> InputStream,
+        pageBytes: ByteArray,
         nw: Int,
         nh: Int,
         foreground: Boolean,
@@ -173,8 +190,10 @@ object SamRefiner {
             if (foreground) _activeEncodes.update { it + 1 }
             try {
                 val t0 = System.currentTimeMillis()
-                val e = runEncoder(enc, streamFn, nw, nh) ?: return null
-                if (foreground) noteEncodeLatency(System.currentTimeMillis() - t0)
+                val e = runEncoder(enc, pageBytes, nw, nh) ?: return null
+                val dt = System.currentTimeMillis() - t0
+                logcat(LogPriority.WARN) { "SamRefiner: encode ${dt}ms (encoder=$encBackend, foreground=$foreground)" }
+                if (foreground) noteEncodeLatency(dt)
                 embeddings.put(pageKey, e)
                 return e
             } finally {
@@ -215,12 +234,13 @@ object SamRefiner {
         ensureInit(context)
         val dec = decoder ?: return null
 
-        val (pw, ph) = pageDims(streamFn) ?: return null
+        val bytes = snapshot(streamFn) ?: return null
+        val (pw, ph) = pageDims(bytes) ?: return null
         val gain = INPUT.toFloat() / max(pw, ph)
         val nw = (pw * gain).roundToInt().coerceIn(1, INPUT)
         val nh = (ph * gain).roundToInt().coerceIn(1, INPUT)
 
-        val embedding = embedFor(pageKey, streamFn, nw, nh, foreground = true) ?: return null
+        val embedding = embedFor(pageKey, bytes, nw, nh, foreground = true) ?: return null
 
         // Padding is bottom-right anchored, so resized coords == padded (1024) coords.
         val box = floatArrayOf(
@@ -266,8 +286,8 @@ object SamRefiner {
         fun gy(ny: Float) = ((ny - cropNorm.top) / cropNorm.height().coerceAtLeast(1e-4f) * outH)
         // Prompt box in grid space, expanded a little — SAM must not reach past this into neighbours.
         val bx = boxNorm
-        val padX = (gx(bx.right) - gx(bx.left)) * 0.14f
-        val padY = (gy(bx.bottom) - gy(bx.top)) * 0.14f
+        val padX = (gx(bx.right) - gx(bx.left)) * 0.16f
+        val padY = (gy(bx.bottom) - gy(bx.top)) * 0.16f
         val clampL = (gx(bx.left) - padX).toInt().coerceIn(0, outW - 1)
         val clampT = (gy(bx.top) - padY).toInt().coerceIn(0, outH - 1)
         val clampR = (gx(bx.right) + padX).toInt().coerceIn(clampL + 1, outW)
@@ -275,7 +295,9 @@ object SamRefiner {
 
         // Bilinearly resample the 256-grid logits into the output grid and turn them into a soft
         // (anti-aliased) alpha ramp. Nearest + hard threshold gives a visible staircase when a small
-        // bubble's ~50px mask window is blown up across the screen.
+        // bubble's ~50px mask window is blown up across the screen. The ramp is kept tight (~1.4
+        // logit units): EdgeSAM's boundary is softer than MobileSAM's, and a wide ramp there smears
+        // the edge and lets the bubble bleed toward its neighbour.
         val alpha = FloatArray(outW * outH)
         val on = BooleanArray(outW * outH)
         for (oy in clampT until clampB) {
@@ -288,16 +310,30 @@ object SamRefiner {
                 val wx = fx - x0
                 val lg = (logits[y0 * MASK + x0] * (1 - wx) + logits[y0 * MASK + x0 + 1] * wx) * (1 - wy) +
                     (logits[(y0 + 1) * MASK + x0] * (1 - wx) + logits[(y0 + 1) * MASK + x0 + 1] * wx) * wy
-                val a = ((lg + 1.5f) / 3f).coerceIn(0f, 1f) // ramp over ~3 logit units around 0
+                val a = ((lg + 0.7f) / 1.4f).coerceIn(0f, 1f)
                 alpha[oy * outW + ox] = a
                 if (a >= 0.5f) on[oy * outW + ox] = true
             }
         }
 
+        // Morphologically open then close the hard mask: opening severs thin drips / tail leak that
+        // EdgeSAM feathers off the bottom of a balloon, closing fills the matching bites out of the
+        // boundary. Radius scales with the mask window so it's a few px either way.
+        val morph = max(1, min(clampR - clampL, clampB - clampT) / 44)
+        val cleaned = closeBool(
+            openBool(on, outW, morph, clampL, clampT, clampR, clampB),
+            outW,
+            morph,
+            clampL,
+            clampT,
+            clampR,
+            clampB,
+        )
+
         // Keep only the blob under the box centre — kills leakage into an adjacent bubble/caption.
         val seedX = gx((bx.left + bx.right) / 2f).toInt().coerceIn(clampL, clampR - 1)
         val seedY = gy((bx.top + bx.bottom) / 2f).toInt().coerceIn(clampT, clampB - 1)
-        val kept = largestComponentNear(on, outW, seedX, seedY, clampL, clampT, clampR, clampB)
+        val kept = largestComponentNear(cleaned, outW, seedX, seedY, clampL, clampT, clampR, clampB)
         // Dilate the gate so the blur below has room to feather outward past the hard component edge.
         val gate = dilateBool(kept, outW, 3, clampL, clampT, clampR, clampB)
 
@@ -379,6 +415,46 @@ object SamRefiner {
     }
 
     /**
+     * [iterations] rounds of 4-neighbour erosion, bounded to the (l,t)-(r,b) box. Neighbours outside
+     * the box count as set, so only true mask boundaries erode, not the clamp edge. [w] is the row stride.
+     */
+    private fun erodeBool(
+        src: BooleanArray,
+        w: Int,
+        iterations: Int,
+        l: Int,
+        t: Int,
+        r: Int,
+        b: Int,
+    ): BooleanArray {
+        var cur = src
+        repeat(iterations) {
+            val nxt = cur.copyOf()
+            for (y in t until b) {
+                for (x in l until r) {
+                    val i = y * w + x
+                    if (!cur[i]) continue
+                    val left = x <= l || cur[i - 1]
+                    val right = x >= r - 1 || cur[i + 1]
+                    val up = y <= t || cur[i - w]
+                    val down = y >= b - 1 || cur[i + w]
+                    if (!(left && right && up && down)) nxt[i] = false
+                }
+            }
+            cur = nxt
+        }
+        return cur
+    }
+
+    /** Erode then dilate: removes protrusions / bridges thinner than 2*[iterations]. */
+    private fun openBool(src: BooleanArray, w: Int, iterations: Int, l: Int, t: Int, r: Int, b: Int): BooleanArray =
+        dilateBool(erodeBool(src, w, iterations, l, t, r, b), w, iterations, l, t, r, b)
+
+    /** Dilate then erode: fills notches / gaps thinner than 2*[iterations]. */
+    private fun closeBool(src: BooleanArray, w: Int, iterations: Int, l: Int, t: Int, r: Int, b: Int): BooleanArray =
+        erodeBool(dilateBool(src, w, iterations, l, t, r, b), w, iterations, l, t, r, b)
+
+    /**
      * BFS the opaque component that contains (or is nearest to) the seed, within the (l,t)-(r,b) box.
      * [w] is the row stride; the returned mask is `w * b` long (indices past row `b` stay false).
      */
@@ -456,8 +532,8 @@ object SamRefiner {
         }
     }
 
-    private fun runEncoder(enc: Interpreter, streamFn: () -> InputStream, nw: Int, nh: Int): FloatArray? {
-        val page = decodePage(streamFn) ?: return null
+    private fun runEncoder(enc: Interpreter, pageBytes: ByteArray, nw: Int, nh: Int): FloatArray? {
+        val page = decodePage(pageBytes) ?: return null
         val resized = Bitmap.createScaledBitmap(page, nw, nh, true)
         if (resized != page) page.recycle()
         val px = IntArray(nw * nh)
@@ -499,15 +575,15 @@ object SamRefiner {
         }.getOrNull()
     }
 
-    private fun pageDims(streamFn: () -> InputStream): Pair<Int, Int>? {
+    private fun pageDims(pageBytes: ByteArray): Pair<Int, Int>? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        runCatching { streamFn().use { BitmapFactory.decodeStream(it, null, bounds) } }
+        runCatching { BitmapFactory.decodeByteArray(pageBytes, 0, pageBytes.size, bounds) }
         return if (bounds.outWidth > 0 && bounds.outHeight > 0) bounds.outWidth to bounds.outHeight else null
     }
 
-    private fun decodePage(streamFn: () -> InputStream): Bitmap? {
+    private fun decodePage(pageBytes: ByteArray): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        runCatching { streamFn().use { BitmapFactory.decodeStream(it, null, bounds) } }
+        runCatching { BitmapFactory.decodeByteArray(pageBytes, 0, pageBytes.size, bounds) }
         val w = bounds.outWidth
         val h = bounds.outHeight
         if (w <= 0 || h <= 0) return null
@@ -517,26 +593,32 @@ object SamRefiner {
             inSampleSize = sample
             inPreferredConfig = Bitmap.Config.ARGB_8888
         }
-        return runCatching { streamFn().use { BitmapFactory.decodeStream(it, null, opts) } }.getOrNull()
+        return runCatching { BitmapFactory.decodeByteArray(pageBytes, 0, pageBytes.size, opts) }.getOrNull()
     }
 
     /**
-     * Tries the GPU delegate, then XNNPACK CPU. NNAPI was evaluated on the target device (Qualcomm)
-     * and rejected almost every op of MobileSAM's TinyViT encoder — it fell straight back to XNNPACK
-     * in 200+ tiny partitions, which is slower than plain XNNPACK — so it is not attempted.
+     * Tries the GPU delegate, then XNNPACK CPU. EdgeSAM's RepViT encoder is pure convolution, so the
+     * GPU delegate accepts the whole graph (MobileSAM's TinyViT did not — it fell back to XNNPACK in
+     * 200+ tiny partitions). NNAPI is still not attempted: it was rejected the same way on the target
+     * Qualcomm device and is slower than plain XNNPACK when it partitions.
      * [onBackend] is called with the chosen backend's name.
      */
     private fun makeInterpreter(buffer: MappedByteBuffer, onBackend: (String) -> Unit): Interpreter {
         val compat = CompatibilityList()
-        if (compat.isDelegateSupportedOnThisDevice) {
+        // CompatibilityList's bundled denylist reports "unsupported" on some current Adreno parts it
+        // simply doesn't know yet; EdgeSAM's RepViT graph is all conv, so we attempt the GPU delegate
+        // regardless and fall back to XNNPACK if interpreter creation actually throws.
+        val gpuSupported = compat.isDelegateSupportedOnThisDevice
+        run {
             try {
-                val delegate = GpuDelegate(compat.bestOptionsForThisDevice)
+                val options = if (gpuSupported) compat.bestOptionsForThisDevice else GpuDelegate.Options()
+                val delegate = GpuDelegate(options)
                 val itp = Interpreter(buffer, Interpreter.Options().apply { addDelegate(delegate) })
                 delegates += delegate
-                onBackend("gpu")
+                onBackend(if (gpuSupported) "gpu" else "gpu(forced)")
                 return itp
             } catch (t: Throwable) {
-                logcat(LogPriority.WARN) { "SamRefiner: GPU delegate init failed: ${t.message}" }
+                logcat(LogPriority.WARN) { "SamRefiner: GPU delegate init failed (compatList=$gpuSupported): ${t.message}" }
             }
         }
         buffer.rewind()

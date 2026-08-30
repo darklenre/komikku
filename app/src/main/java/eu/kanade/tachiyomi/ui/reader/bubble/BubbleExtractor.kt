@@ -28,15 +28,16 @@ import kotlin.math.min
  * The bubble's detection box is decoded from the page stream at native resolution with a small
  * margin, then shaped by [ReaderPreferences.bubbleZoomCroppingMethod]:
  *  - `"none"`: a rounded rectangle.
- *  - `"sam"`: a MobileSAM box-prompted mask ([SamRefiner]) — falls back to the rounded rectangle
+ *  - `"sam"`: an EdgeSAM box-prompted mask ([SamRefiner]) — falls back to the rounded rectangle
  *    when SAM is unavailable.
  * The silhouette is also traced to a vector [BubbleCutout.outline] (stroked live by the overlay when
  * [ReaderPreferences.bubbleZoomOutline] is on) and its body centre is found for tail-aware framing.
  */
 object BubbleExtractor {
 
-    /** Extra margin decoded around the tight detection box so scallops / the tail have room. */
-    private const val CROP_MARGIN = 0.22f
+    /** Extra margin decoded around the detection box so the balloon art that bulges past the boxed
+     *  text (scallops, tail, a linked balloon's outer lobes) is inside the crop the mask is built in. */
+    private const val CROP_MARGIN = 0.26f
 
     /** Working resolution the shape mask is built at before being upscaled onto the crop. */
     private const val WORK_MAX = 400
@@ -122,13 +123,14 @@ object BubbleExtractor {
         val result = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         canvas.drawBitmap(cropped, 0f, 0f, null)
-        if (cropped !== result) cropped.recycle()
 
+        // Build the mask before recycling [cropped] — the Tier-1 flood extractor reads its pixels.
         val shape = if (method == "sam") {
-            samShape(context, page, streamFn, bubble, expandedCrop, cropW, cropH)
+            compositeMask(context, page, streamFn, bubble, expandedCrop, cropped, cropW, cropH)
         } else {
             null
         }
+        if (cropped !== result) cropped.recycle()
 
         if (shape == null) {
             applyRoundedRect(canvas, cropW, cropH)
@@ -183,7 +185,9 @@ object BubbleExtractor {
             null
         } else {
             traceContour(inside, gw, gh)?.let { contour ->
-                val smooth = chaikinClosed(chaikinClosed(contour))
+                // The raw trace is one point per boundary pixel — a dense staircase that Chaikin only
+                // nibbles. Decimate to ~a hundred evenly spaced vertices first, then round hard (x3).
+                val smooth = chaikinClosed(chaikinClosed(chaikinClosed(decimateClosed(contour, 100))))
                 Path().apply {
                     moveTo(smooth[0] / gw, smooth[1] / gh)
                     var i = 2
@@ -248,30 +252,145 @@ object BubbleExtractor {
         layer.recycle()
     }
 
-    /** A MobileSAM box-prompted alpha mask for this bubble, sized to the crop. Null if unavailable. */
-    private fun samShape(
+    /**
+     * Alpha mask for [bubble] over the crop, as an `w`x`h` ARGB bitmap (upscaled onto the crop by the
+     * caller). Each lobe — the whole bubble if it isn't a linked merge — is masked on its own by the
+     * classical [BubbleFloodExtractor] first, falling back to [SamRefiner] per lobe; the per-lobe
+     * masks are OR-composited. Null if nothing produced a mask (→ rounded-rectangle fallback).
+     */
+    private fun compositeMask(
         context: Context?,
         page: ReaderPage?,
         streamFn: (() -> InputStream)?,
         bubble: Bubble,
         expandedCrop: RectF?,
+        crop: Bitmap,
         cropW: Int,
         cropH: Int,
     ): Bitmap? {
-        if (context == null || page == null || streamFn == null || expandedCrop == null) return null
+        val exp = expandedCrop ?: bubble.rect
         val w = min(cropW, WORK_MAX)
         val h = max(16, (cropH.toFloat() / cropW * w).toInt())
-        return runCatching {
+        val lobes = bubble.lobes ?: listOf(bubble.rect)
+        val acc = FloatArray(w * h)
+        var any = false
+        val guide by lazy { grayGuide(crop, w, h) }
+        for (lobe in lobes) {
+            val flood = runCatching { BubbleFloodExtractor.mask(crop, lobe, exp, w, h) }.getOrNull()
+            var alpha = flood
+            if (alpha == null) {
+                // Tier-2: SAM, then snap its ~few-px-off boundary onto the real ink edge.
+                alpha = samLobeAlpha(context, page, streamFn, lobe, exp, w, h)
+                    ?.let { snapToEdges(it, guide, w, h) }
+            }
+            if (alpha != null) {
+                BubbleFloodExtractor.orInto(acc, alpha)
+                any = true
+            }
+        }
+        if (!any) return null
+        val out = IntArray(w * h)
+        for (i in out.indices) {
+            val a = (acc[i] * 255f).toInt().coerceIn(0, 255)
+            out[i] = (a shl 24) or 0x00FFFFFF
+        }
+        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+    }
+
+    /** One lobe's EdgeSAM box-prompted alpha (0..1, `w`x`h`), or null if SAM is unavailable. */
+    private fun samLobeAlpha(
+        context: Context?,
+        page: ReaderPage?,
+        streamFn: (() -> InputStream)?,
+        lobeNorm: RectF,
+        cropNorm: RectF,
+        w: Int,
+        h: Int,
+    ): FloatArray? {
+        if (context == null || page == null || streamFn == null) return null
+        val bmp = runCatching {
             SamRefiner.shapeMask(
                 context = context,
                 pageKey = bubbleKeyFor(page),
                 streamFn = streamFn,
-                boxNorm = bubble.rect,
-                cropNorm = expandedCrop,
+                boxNorm = lobeNorm,
+                cropNorm = cropNorm,
                 outW = w,
                 outH = h,
             )
-        }.getOrNull()
+        }.getOrNull() ?: return null
+        val px = IntArray(w * h)
+        bmp.getPixels(px, 0, w, 0, 0, w, h)
+        bmp.recycle()
+        return FloatArray(px.size) { (px[it] ushr 24) / 255f }
+    }
+
+    /** Grayscale (0..1) of [crop] resampled to `w`x`h`, as the guide image for [snapToEdges]. */
+    private fun grayGuide(crop: Bitmap, w: Int, h: Int): FloatArray {
+        val scaled = if (crop.width == w && crop.height == h) crop else Bitmap.createScaledBitmap(crop, w, h, true)
+        val px = IntArray(w * h)
+        scaled.getPixels(px, 0, w, 0, 0, w, h)
+        if (scaled !== crop) scaled.recycle()
+        return FloatArray(px.size) {
+            val p = px[it]
+            (0.299f * ((p ushr 16) and 0xFF) + 0.587f * ((p ushr 8) and 0xFF) + 0.114f * (p and 0xFF)) / 255f
+        }
+    }
+
+    /**
+     * Guided-filter edge refinement: pulls the soft mask [p]'s boundary onto the guide image's own
+     * edges (the balloon's ink outline), then re-thresholds. Where the guide has no edge (borderless
+     * balloon) it degrades to a light smoothing, so it's safe to apply unconditionally.
+     */
+    private fun snapToEdges(p: FloatArray, guide: FloatArray, w: Int, h: Int): FloatArray {
+        val n = w * h
+        val r = max(2, min(w, h) / 48)
+        val eps = 1e-3f
+        val ii = FloatArray(n) { guide[it] * guide[it] }
+        val ip = FloatArray(n) { guide[it] * p[it] }
+        val mI = boxBlur(guide, w, h, r)
+        val mP = boxBlur(p, w, h, r)
+        val mII = boxBlur(ii, w, h, r)
+        val mIP = boxBlur(ip, w, h, r)
+        val a = FloatArray(n)
+        val b = FloatArray(n)
+        for (i in 0 until n) {
+            val varI = mII[i] - mI[i] * mI[i]
+            val covIp = mIP[i] - mI[i] * mP[i]
+            a[i] = covIp / (varI + eps)
+            b[i] = mP[i] - a[i] * mI[i]
+        }
+        val mA = boxBlur(a, w, h, r)
+        val mB = boxBlur(b, w, h, r)
+        val out = FloatArray(n)
+        for (i in 0 until n) {
+            val q = mA[i] * guide[i] + mB[i]
+            out[i] = if (q >= 0.5f) 1f else 0f
+        }
+        return out
+    }
+
+    /** Separable box blur of a full `w`x`h` plane (radius [r]), edge-clamped. */
+    private fun boxBlur(src: FloatArray, w: Int, h: Int, r: Int): FloatArray {
+        val tmp = FloatArray(src.size)
+        val dst = FloatArray(src.size)
+        val norm = 1f / (2 * r + 1)
+        for (y in 0 until h) {
+            val row = y * w
+            for (x in 0 until w) {
+                var s = 0f
+                for (k in -r..r) s += src[row + (x + k).coerceIn(0, w - 1)]
+                tmp[row + x] = s * norm
+            }
+        }
+        for (x in 0 until w) {
+            for (y in 0 until h) {
+                var s = 0f
+                for (k in -r..r) s += tmp[(y + k).coerceIn(0, h - 1) * w + x]
+                dst[y * w + x] = s * norm
+            }
+        }
+        return dst
     }
 
     /**
@@ -339,6 +458,26 @@ object BubbleExtractor {
             if (++steps > maxSteps) break
         }
         return if (pts.size >= 24) pts.toFloatArray() else null
+    }
+
+    /**
+     * Keeps ~[targetPts] evenly spaced vertices of a closed polygon (x,y pairs). Returned unchanged
+     * if it already has fewer, or if [targetPts] is too small to describe a shape.
+     */
+    internal fun decimateClosed(p: FloatArray, targetPts: Int): FloatArray {
+        val n = p.size / 2
+        if (targetPts < 4 || n <= targetPts) return p
+        val step = n.toFloat() / targetPts
+        val out = FloatArray(targetPts * 2)
+        var o = 0
+        var k = 0
+        while (k < targetPts) {
+            val idx = (k * step).toInt().coerceIn(0, n - 1)
+            out[o++] = p[idx * 2]
+            out[o++] = p[idx * 2 + 1]
+            k++
+        }
+        return out
     }
 
     /** One round of Chaikin corner-cutting on a closed polygon (x,y pairs). Doubles the point count. */

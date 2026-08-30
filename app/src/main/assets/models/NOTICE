@@ -22,14 +22,14 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
 --------------------------------------------------------------------------------
 2. Cutout refinement (SAM)
 --------------------------------------------------------------------------------
-  Name:     MobileSAM
-  Authors:  Chaoning Zhang et al. (Kyung Hee University)
-  Upstream: https://github.com/ChaoningZhang/MobileSAM
+  Name:     EdgeSAM
+  Authors:  Chong Zhou et al. (S-Lab, Nanyang Technological University)
+  Upstream: https://github.com/chongzhou96/EdgeSAM
   Licence:  Apache License 2.0
 
   Bundled artifacts:
-    sam_encoder.tflite   TinyViT image encoder, fp32 TFLite export.
-    sam_decoder.tflite   box-prompted mask decoder, fp32 TFLite export.
+    sam_encoder_edgesam.tflite   RepViT image encoder, fp32 TFLite export.
+    sam_decoder_edgesam.tflite   box-prompted mask decoder, fp32 TFLite export.
 
 --------------------------------------------------------------------------------
 
