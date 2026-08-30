@@ -151,9 +151,15 @@ class ReaderPreferences(
     // KMK -->
     fun bubbleZoom() = preferenceStore.getBoolean("bubble_zoom", false)
     fun bubbleZoomHintShown() = preferenceStore.getBoolean("bubble_zoom_hint_shown", false)
-    fun bubbleZoomEngine() = preferenceStore.getString("bubble_zoom_engine", "seg")
     fun bubbleZoomInPlaceGesture() = preferenceStore.getString("bubble_zoom_in_place_gesture", "long_tap")
     fun bubbleZoomFloatingGesture() = preferenceStore.getString("bubble_zoom_floating_gesture", "double_tap")
+
+    /** Floating-cutout shape: "none" (rounded rect) or "sam" (MobileSAM refinement). */
+    fun bubbleZoomCroppingMethod() = preferenceStore.getString("bubble_zoom_cropping_method", "sam")
+    fun bubbleZoomOutline() = preferenceStore.getBoolean("bubble_zoom_outline", true)
+
+    /** Sticker-outline thickness, as a percentage of the cutout's short side (see slider range). */
+    fun bubbleZoomOutlineWidth() = preferenceStore.getInt("bubble_zoom_outline_width", 3)
     fun bubbleZoomFloatingBackdrop() = preferenceStore.getBoolean("bubble_zoom_floating_backdrop", true)
     // KMK <--
 
@@ -273,6 +279,9 @@ class ReaderPreferences(
     companion object {
         const val WEBTOON_PADDING_MIN = 0
         const val WEBTOON_PADDING_MAX = 25
+
+        const val BUBBLE_ZOOM_OUTLINE_WIDTH_MIN = 1
+        const val BUBBLE_ZOOM_OUTLINE_WIDTH_MAX = 8
 
         const val MILLI_CONVERSION = 100
 

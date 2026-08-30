@@ -1,0 +1,14 @@
+{
+  "uniqueId": "com.github.chaoningzhang:mobilesam",
+  "artifactVersion": "2023.06",
+  "name": "MobileSAM",
+  "description": "Lightweight Segment Anything (TinyViT encoder + box-prompted mask decoder) by Chaoning Zhang et al., bundled as fp32 TFLite exports in app/src/main/assets/models/ to refine the speech-bubble cutout for the reader's Bubble Zoom feature.",
+  "website": "https://github.com/ChaoningZhang/MobileSAM",
+  "developers": [
+    { "name": "Chaoning Zhang et al." }
+  ],
+  "licenses": [
+    "Apache-2.0"
+  ],
+  "tag": "Bundled model"
+}

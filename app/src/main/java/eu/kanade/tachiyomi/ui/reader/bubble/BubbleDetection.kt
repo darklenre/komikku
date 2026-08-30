@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.io.InputStream
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -33,15 +34,7 @@ object BubbleDetection {
      */
     private const val MIN_TOTAL_RAM_BYTES = 2L * 1024 * 1024 * 1024
 
-    private val cache = object : LruCache<String, List<Bubble>>(CACHE_SIZE) {
-        // Bubbles from the segmentation engine carry an ARGB mask Bitmap; recycle it when the page
-        // drops out of the cache so masks don't pile up until GC (evictAll / eviction / remove).
-        override fun entryRemoved(evicted: Boolean, key: String, oldValue: List<Bubble>, newValue: List<Bubble>?) {
-            if (newValue == null) {
-                oldValue.forEach { it.maskBitmap?.recycle() }
-            }
-        }
-    }
+    private val cache = LruCache<String, List<Bubble>>(CACHE_SIZE)
 
     @Volatile
     private var detector: BubbleDetector? = null
@@ -61,6 +54,9 @@ object BubbleDetection {
     }
 
     fun cached(key: String): List<Bubble>? = cache.get(key)
+
+    /** True while detection for [key] has been requested but no result (even an empty one) is cached yet. */
+    fun isPending(key: String): Boolean = cache.get(key) == null
 
     private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -94,12 +90,24 @@ object BubbleDetection {
         }
     }
 
-    fun onEngineChanged() {
-        synchronized(this) {
-            (detector as? OnnxBubbleDetector)?.close()
-            (detector as? TfliteBubbleDetector)?.close()
-            detector = null
-            cache.evictAll()
+    /**
+     * Kicks a background MobileSAM image-encode for [key] so the first floating cutout on the page
+     * doesn't pay the ~2-3 s encoder latency. No-op unless the cutout method actually uses SAM.
+     *
+     * Called per page holder as it binds; [SamRefiner] serialises the encodes on one lock and skips
+     * pages whose embedding is already cached, so the reader's preload turns into at most a handful
+     * of queued encodes that then go idle — in steady-state reading it is one encode per page turn.
+     */
+    fun prewarmSam(context: Context, key: String, streamFn: () -> InputStream) {
+        val method = try {
+            Injekt.get<ReaderPreferences>().bubbleZoomCroppingMethod().get()
+        } catch (t: Throwable) {
+            return
+        }
+        if (method != "sam") return
+        val appContext = context.applicationContext
+        detectionScope.launch {
+            runCatching { SamRefiner.prewarm(appContext, key, streamFn) }
         }
     }
 
@@ -107,14 +115,8 @@ object BubbleDetection {
         detector?.let { return it }
         return synchronized(this) {
             detector ?: run {
-                if (!isSupported(appContext)) return@synchronized NoopBubbleDetector
-                val engine = try {
-                    Injekt.get<ReaderPreferences>().bubbleZoomEngine().get()
-                } catch (t: Throwable) {
-                    "seg"
-                }
-                if (engine == "ogkalu") {
-                    OnnxBubbleDetector(appContext)
+                if (!isSupported(appContext)) {
+                    NoopBubbleDetector
                 } else {
                     TfliteBubbleDetector(appContext)
                 }

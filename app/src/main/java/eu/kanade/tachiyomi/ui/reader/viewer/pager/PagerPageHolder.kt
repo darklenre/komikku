@@ -245,6 +245,9 @@ class PagerPageHolder(
             detectionBitmap?.let { bitmap ->
                 BubbleDetection.enqueue(context, bubbleKeyFor(page), bitmap)
             }
+            if (viewer.config.bubbleZoomEnabled) {
+                BubbleDetection.prewarmSam(context, bubbleKeyFor(page), streamFn)
+            }
             // KMK <--
         } catch (e: Throwable) {
             detectionBitmap?.recycle()

@@ -369,9 +369,11 @@ class ReaderActivity : BaseActivity() {
 
                 AppBars(state = state)
 
-                // KMK --> Bubble Zoom: thin indeterminate bar while a page's bubble detection runs
+                // KMK --> Bubble Zoom: thin indeterminate bar while a page's bubble detection runs, or
+                // while an interactive MobileSAM image-encode blocks an open floating cutout.
                 val bubbleDetections by BubbleDetection.activeDetections.collectAsState()
-                if (bubbleDetections > 0) {
+                val samEncodes by eu.kanade.tachiyomi.ui.reader.bubble.SamRefiner.activeEncodes.collectAsState()
+                if (bubbleDetections > 0 || samEncodes > 0) {
                     LinearProgressIndicator(
                         modifier = Modifier
                             .align(Alignment.TopCenter)
@@ -1217,6 +1219,7 @@ class ReaderActivity : BaseActivity() {
         page: eu.kanade.tachiyomi.ui.reader.model.ReaderPage,
         bubbles: List<eu.kanade.tachiyomi.ui.reader.bubble.Bubble>,
         startIndex: Int,
+        sourceSize: android.util.Size,
         style: eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView.ZoomStyle = eu.kanade.tachiyomi.ui.reader.viewer.BubbleZoomOverlayView.ZoomStyle.IN_PLACE,
     ) {
         hideMenu()
@@ -1231,6 +1234,7 @@ class ReaderActivity : BaseActivity() {
             page = page,
             bubbles = bubbles,
             startIndex = startIndex,
+            sourceSize = sourceSize,
             style = style,
             backdrop = readerPreferences.bubbleZoomFloatingBackdrop().get(),
             hint = hint,
@@ -1246,6 +1250,16 @@ class ReaderActivity : BaseActivity() {
 
     fun exitBubbleZoom() {
         binding.bubbleZoomOverlay.exit()
+    }
+
+    private var lastBubbleCueAt = 0L
+
+    /** The Bubble Zoom gesture landed on a page whose detection hasn't finished — tell the user why. */
+    fun notifyBubbleZoomDetecting() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastBubbleCueAt < 2500L) return
+        lastBubbleCueAt = now
+        toast(KMR.strings.bubble_zoom_detecting)
     }
     // KMK <--
 
