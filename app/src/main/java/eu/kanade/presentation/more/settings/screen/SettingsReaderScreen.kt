@@ -573,6 +573,9 @@ object SettingsReaderScreen : SearchableSettings {
         val outlineWidthPref = readerPreferences.bubbleZoomOutlineWidth()
         val outlineWidth by outlineWidthPref.collectAsState()
         val floatingBackdropPref = readerPreferences.bubbleZoomFloatingBackdrop()
+        val confidencePref = readerPreferences.bubbleZoomConfidence()
+        val confidence by confidencePref.collectAsState()
+        val tapAnywherePref = readerPreferences.bubbleZoomTapAnywhere()
 
         val gestureEntries = persistentMapOf(
             "long_tap" to stringResource(KMR.strings.bubble_zoom_gesture_long_tap),
@@ -630,6 +633,24 @@ object SettingsReaderScreen : SearchableSettings {
                     preference = floatingBackdropPref,
                     title = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop),
                     subtitle = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop_summary),
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                ),
+                Preference.PreferenceItem.SliderPreference(
+                    value = confidence,
+                    valueRange = ReaderPreferences.BUBBLE_ZOOM_CONFIDENCE_MIN..ReaderPreferences.BUBBLE_ZOOM_CONFIDENCE_MAX,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_confidence),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_confidence_summary),
+                    valueString = "$confidence%",
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                    onValueChanged = {
+                        confidencePref.set(it)
+                        BubbleDetection.clearCache()
+                    },
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = tapAnywherePref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_tap_anywhere),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_tap_anywhere_summary),
                     enabled = bubbleZoomSupported && isBubbleZoomEnabled,
                 ),
             ),

@@ -117,10 +117,10 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
 
     override val isAvailable: Boolean get() = interpreter != null && ::inputBuffer.isInitialized
 
-    override suspend fun detect(bitmap: Bitmap): List<Bubble> {
+    override suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble> {
         val interp = interpreter ?: return emptyList()
         return withContext(dispatcher) {
-            runCatching { infer(interp, bitmap) }
+            runCatching { infer(interp, bitmap, confThreshold) }
                 .onFailure { logcat(LogPriority.ERROR) { "TfliteBubbleDetector: inference failed: ${it.message}" } }
                 .getOrDefault(emptyList())
         }
@@ -137,7 +137,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         }
     }
 
-    private fun infer(interp: Interpreter, bitmap: Bitmap): List<Bubble> {
+    private fun infer(interp: Interpreter, bitmap: Bitmap, confThreshold: Float): List<Bubble> {
         val lb = letterboxOf(bitmap.width, bitmap.height, inputSize)
 
         val scaled = Bitmap.createScaledBitmap(bitmap, lb.nw, lb.nh, true)
@@ -201,7 +201,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
             featureMajor = featureMajor,
             lb = lb,
             coordsIn640Space = coordsIn640Space,
-            confThreshold = CONF_THRESHOLD,
+            confThreshold = confThreshold,
             iouThreshold = IOU_THRESHOLD,
         )
     }
@@ -213,7 +213,6 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         const val ASSET_SHA = "98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282"
 
         const val INPUT = 640
-        const val CONF_THRESHOLD = 0.30f
         const val IOU_THRESHOLD = 0.45f
     }
 }

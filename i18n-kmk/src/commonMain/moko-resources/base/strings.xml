@@ -44,6 +44,10 @@
     <string name="bubble_zoom_gesture_long_tap">Long tap</string>
     <string name="bubble_zoom_gesture_double_tap">Double tap</string>
     <string name="bubble_zoom_gesture_disabled">Disabled</string>
+    <string name="pref_bubble_zoom_confidence">Minimum detection confidence</string>
+    <string name="pref_bubble_zoom_confidence_summary">Lower finds more bubbles but also more false positives; higher is stricter.</string>
+    <string name="pref_bubble_zoom_tap_anywhere">Tap anywhere to zoom</string>
+    <string name="pref_bubble_zoom_tap_anywhere_summary">When a floating-cutout gesture misses every detected bubble, zoom a default-sized area around the tap instead.</string>
     <string name="bubble_zoom_hint">Tap to exit · swipe to move between bubbles</string>
     <string name="bubble_zoom_detecting">Detecting speech bubbles…</string>
     <string name="error_opening_folder">Failed to open folder</string>

@@ -32,6 +32,9 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
     var bubbleZoomInPlaceGesture = "long_tap"
     var bubbleZoomFloatingGesture = "double_tap"
 
+    /** "Tap anywhere to zoom": a FLOATING gesture that misses every bubble synthesises one at the tap. */
+    var bubbleZoomTapAnywhere = false
+
     /** True when a double-tap is bound to Bubble Zoom, so the page's own double-tap zoom must yield. */
     val bubbleZoomUsesDoubleTap: Boolean
         get() = bubbleZoomEnabled &&
@@ -94,6 +97,8 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
             .register({ bubbleZoomInPlaceGesture = it })
         readerPreferences.bubbleZoomFloatingGesture()
             .register({ bubbleZoomFloatingGesture = it })
+        readerPreferences.bubbleZoomTapAnywhere()
+            .register({ bubbleZoomTapAnywhere = it })
         // KMK <--
     }
 

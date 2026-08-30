@@ -9,11 +9,12 @@ import android.graphics.Bitmap
 interface BubbleDetector {
     val isAvailable: Boolean
 
-    suspend fun detect(bitmap: Bitmap): List<Bubble>
+    /** @param confThreshold minimum detector confidence (0..1) for a box to be kept. */
+    suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble>
 }
 
 /** Used when Bubble Zoom is off or the device can't run the model — long-tap falls back to the menu. */
 object NoopBubbleDetector : BubbleDetector {
     override val isAvailable = false
-    override suspend fun detect(bitmap: Bitmap): List<Bubble> = emptyList()
+    override suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble> = emptyList()
 }
