@@ -101,10 +101,11 @@ object BubbleDetection {
         val confThreshold = confidenceThreshold()
         _activeDetections.update { it + 1 }
         try {
-            val result = detectorFor(context.applicationContext)
+            val raw = detectorFor(context.applicationContext)
                 .takeIf { it.isAvailable }
                 ?.detect(bitmap, confThreshold)
                 ?: emptyList()
+            val result = mergeLinked(raw, bitmap)
             cache.put(key, result)
             return result
         } finally {
@@ -150,7 +151,7 @@ object BubbleDetection {
                     }
                 }
             }
-            val result = dedupeBubbles(merged)
+            val result = mergeLinked(dedupeBubbles(merged), null)
             cache.put(key, result)
             return result
         } finally {
@@ -323,26 +324,63 @@ internal fun groupLinked(
  */
 private const val LINK_OVERLAP_FRAC = 0.5f
 
-/** Max vertical gap between stacked lobes, as a fraction of the shorter box (negative = overlap). */
-private const val LINK_STACK_GAP_FRAC = 0.35f
+/**
+ * Max vertical / horizontal gap between candidate linked lobes, as a fraction of the shorter box
+ * (negative = the boxes overlap). Deliberately loose — geometry only *proposes* a link; the
+ * content check in [mergeLinked] confirms it by looking for balloon fill in the corridor between
+ * the lobes, which is what actually distinguishes a pinched balloon from two adjacent ones.
+ */
+private const val LINK_STACK_GAP_FRAC = 0.40f
+private const val LINK_SIDE_GAP_FRAC = 0.35f
+
+/** A corridor between two lobes is "balloon fill" if at least this fraction of its samples are light+grey. */
+private const val LINK_FILL_FRAC = 0.6f
 
 /**
- * Max horizontal gap between side-by-side lobes, as a fraction of the narrower box. Tighter than the
- * stacked case: side-by-side balloons must nearly touch, or two separate balloons from one speaker
- * sitting near each other get swallowed.
+ * Collapses linked lobes of one balloon into a single [Bubble] (union rect + per-lobe [Bubble.lobes]
+ * for the extractor). Geometry ([groupLinked]) proposes the groups; when [pageBitmap] is given, each
+ * proposed link is confirmed only if the strip between the two lobes is balloon fill (light, low
+ * saturation) — so two separate balloons whose detection boxes merely overlap are NOT merged.
+ * Input order is preserved by each group's first member.
  */
-private const val LINK_SIDE_GAP_FRAC = 0.16f
-
-/**
- * Collapses [groupLinked] groups of `bubbles` into one [Bubble] each: [Bubble.rect] is the union of
- * the group and [Bubble.lobes] carries the original per-lobe rects (null for a lone bubble) so the
- * extractor can mask each lobe on its own. Input order is preserved by each group's first member.
- */
-internal fun mergeLinked(bubbles: List<Bubble>): List<Bubble> {
+internal fun mergeLinked(bubbles: List<Bubble>, pageBitmap: Bitmap?): List<Bubble> {
     if (bubbles.size <= 1) return bubbles
     val boxes = bubbles.map { floatArrayOf(it.rect.left, it.rect.top, it.rect.right, it.rect.bottom) }
-    val groups = groupLinked(boxes, LINK_OVERLAP_FRAC, LINK_STACK_GAP_FRAC, LINK_SIDE_GAP_FRAC)
-    if (groups.size == bubbles.size) return bubbles
+    val candidates = groupLinked(boxes, LINK_OVERLAP_FRAC, LINK_STACK_GAP_FRAC, LINK_SIDE_GAP_FRAC)
+    if (candidates.size == bubbles.size) return bubbles
+
+    // Within each candidate group, keep only the links the page content actually supports, then take
+    // the connected components of what's left.
+    val groups = ArrayList<List<Int>>()
+    for (cand in candidates) {
+        if (cand.size == 1 || pageBitmap == null) {
+            groups += cand
+            continue
+        }
+        val parent = IntArray(cand.size) { it }
+        fun find(a: Int): Int {
+            var x = a
+            while (parent[x] != x) {
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            }
+            return x
+        }
+        for (a in cand.indices) {
+            for (b in a + 1 until cand.size) {
+                if (!areLobesGeometricallyLinked(boxes[cand[a]], boxes[cand[b]])) continue
+                if (corridorIsFill(pageBitmap, bubbles[cand[a]].rect, bubbles[cand[b]].rect)) {
+                    val ra = find(a)
+                    val rb = find(b)
+                    if (ra != rb) parent[maxOf(ra, rb)] = minOf(ra, rb)
+                }
+            }
+        }
+        val byRoot = LinkedHashMap<Int, MutableList<Int>>()
+        for (k in cand.indices) byRoot.getOrPut(find(k)) { mutableListOf() }.add(cand[k])
+        groups += byRoot.values.map { it.toList() }
+    }
+
     return groups.map { group ->
         if (group.size == 1) return@map bubbles[group[0]]
         val union = RectF(1f, 1f, 0f, 0f)
@@ -356,4 +394,85 @@ internal fun mergeLinked(bubbles: List<Bubble>): List<Bubble> {
         }
         Bubble(union, conf, lobes)
     }
+}
+
+/** True if [a] and [b] (`[l,t,r,b]`, 0..1) satisfy the geometric link test on either axis. */
+private fun areLobesGeometricallyLinked(a: FloatArray, b: FloatArray): Boolean {
+    val wa = a[2] - a[0]
+    val wc = b[2] - b[0]
+    val ha = a[3] - a[1]
+    val hc = b[3] - b[1]
+    if (wa <= 0f || wc <= 0f || ha <= 0f || hc <= 0f) return false
+    val minW = minOf(wa, wc)
+    val minH = minOf(ha, hc)
+    val overlapX = minOf(a[2], b[2]) - maxOf(a[0], b[0])
+    val overlapY = minOf(a[3], b[3]) - maxOf(a[1], b[1])
+    val gapX = maxOf(a[0], b[0]) - minOf(a[2], b[2])
+    val gapY = maxOf(a[1], b[1]) - minOf(a[3], b[3])
+    val stacked = overlapX >= LINK_OVERLAP_FRAC * minW && gapY <= LINK_STACK_GAP_FRAC * minH
+    val sideBySide = overlapY >= LINK_OVERLAP_FRAC * minH && gapX <= LINK_SIDE_GAP_FRAC * minW
+    return stacked || sideBySide
+}
+
+/**
+ * Samples a grid in the strip between two lobe rects (0..1 of [bitmap]) and returns true if most of
+ * it is balloon fill — light and near-grey. A pinched balloon has a white corridor between its
+ * lobes; two separate balloons have artwork there.
+ */
+private fun corridorIsFill(bitmap: Bitmap, a: RectF, b: RectF): Boolean {
+    val w = bitmap.width
+    val h = bitmap.height
+    if (w < 4 || h < 4) return true
+    // Strip = gap span on the axis the lobes are separated on, over their overlap band on the other.
+    val overlapX = minOf(a.right, b.right) - maxOf(a.left, b.left)
+    val overlapY = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+    val stacked = overlapX >= overlapY
+    val sx0: Float
+    val sx1: Float
+    val sy0: Float
+    val sy1: Float
+    if (stacked) {
+        sx0 = maxOf(a.left, b.left)
+        sx1 = minOf(a.right, b.right)
+        val loBottom = minOf(a.bottom, b.bottom)
+        val hiTop = maxOf(a.top, b.top)
+        val mid = (loBottom + hiTop) / 2f
+        val half = maxOf((hiTop - loBottom) / 2f, (a.height() + b.height()) * 0.06f)
+        sy0 = mid - half
+        sy1 = mid + half
+    } else {
+        sy0 = maxOf(a.top, b.top)
+        sy1 = minOf(a.bottom, b.bottom)
+        val loRight = minOf(a.right, b.right)
+        val hiLeft = maxOf(a.left, b.left)
+        val mid = (loRight + hiLeft) / 2f
+        val half = maxOf((hiLeft - loRight) / 2f, (a.width() + b.width()) * 0.06f)
+        sx0 = mid - half
+        sx1 = mid + half
+    }
+    val px0 = (minOf(sx0, sx1) * w).toInt().coerceIn(0, w - 1)
+    val px1 = (maxOf(sx0, sx1) * w).toInt().coerceIn(px0 + 1, w)
+    val py0 = (minOf(sy0, sy1) * h).toInt().coerceIn(0, h - 1)
+    val py1 = (maxOf(sy0, sy1) * h).toInt().coerceIn(py0 + 1, h)
+    var fill = 0
+    var total = 0
+    val stepX = maxOf(1, (px1 - px0) / 7)
+    val stepY = maxOf(1, (py1 - py0) / 7)
+    var y = py0
+    while (y < py1) {
+        var x = px0
+        while (x < px1) {
+            val p = bitmap.getPixel(x, y)
+            val r = (p ushr 16) and 0xFF
+            val g = (p ushr 8) and 0xFF
+            val bl = p and 0xFF
+            val luma = 0.299f * r + 0.587f * g + 0.114f * bl
+            val sat = maxOf(r, maxOf(g, bl)) - minOf(r, minOf(g, bl))
+            if (luma >= 175f && sat <= 55) fill++
+            total++
+            x += stepX
+        }
+        y += stepY
+    }
+    return total > 0 && fill.toFloat() / total >= LINK_FILL_FRAC
 }

@@ -44,6 +44,30 @@ class BubbleContourTest {
 
     // endregion
 
+    // region traceAllContours
+
+    @Test
+    fun `traces every blob of a two-lobe mask`() {
+        val w = 24
+        val h = 24
+        val inside = BooleanArray(w * h)
+        for (y in 2..8) for (x in 2..10) inside[y * w + x] = true // lobe A
+        for (y in 14..20) for (x in 3..12) inside[y * w + x] = true // lobe B (disconnected)
+        assertEquals(2, BubbleExtractor.traceAllContours(inside, w, h).size)
+    }
+
+    @Test
+    fun `ignores blobs below the minimum size`() {
+        val w = 20
+        val h = 20
+        val inside = BooleanArray(w * h)
+        for (y in 2..10) for (x in 2..10) inside[y * w + x] = true // big blob
+        inside[18 * w + 18] = true // 1-pixel speck
+        assertEquals(1, BubbleExtractor.traceAllContours(inside, w, h).size)
+    }
+
+    // endregion
+
     // region chaikinClosed
 
     @Test

@@ -13,11 +13,14 @@ import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import android.os.Build
+import android.util.Log
 import android.util.Size
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
+import java.io.File
+import java.io.FileOutputStream
 import java.io.InputStream
 import kotlin.math.max
 import kotlin.math.min
@@ -184,18 +187,25 @@ object BubbleExtractor {
         val path = if (outlinePct <= 0) {
             null
         } else {
-            traceContour(inside, gw, gh)?.let { contour ->
-                // The raw trace is one point per boundary pixel — a dense staircase that Chaikin only
-                // nibbles. Decimate to ~a hundred evenly spaced vertices first, then round hard (x3).
-                val smooth = chaikinClosed(chaikinClosed(chaikinClosed(decimateClosed(contour, 100))))
+            // One subpath per blob: after the union-SAM glue a linked balloon is normally one
+            // connected shape, but if the glue didn't reach every lobe each disconnected piece still
+            // needs its outline. The raw trace is one point per boundary pixel (a dense staircase
+            // Chaikin only nibbles), so decimate first then round hard (x3).
+            val contours = traceAllContours(inside, gw, gh)
+            if (contours.isEmpty()) {
+                null
+            } else {
                 Path().apply {
-                    moveTo(smooth[0] / gw, smooth[1] / gh)
-                    var i = 2
-                    while (i < smooth.size) {
-                        lineTo(smooth[i] / gw, smooth[i + 1] / gh)
-                        i += 2
+                    for (contour in contours) {
+                        val smooth = chaikinClosed(chaikinClosed(chaikinClosed(decimateClosed(contour, 100))))
+                        moveTo(smooth[0] / gw, smooth[1] / gh)
+                        var i = 2
+                        while (i < smooth.size) {
+                            lineTo(smooth[i] / gw, smooth[i + 1] / gh)
+                            i += 2
+                        }
+                        close()
                     }
-                    close()
                 }
             }
         }
@@ -272,16 +282,24 @@ object BubbleExtractor {
         val w = min(cropW, WORK_MAX)
         val h = max(16, (cropH.toFloat() / cropW * w).toInt())
         val lobes = bubble.lobes ?: listOf(bubble.rect)
+        val dbg = Log.isLoggable("BZDump", Log.VERBOSE)
+        if (dbg) {
+            dbgLog(bubble, exp, w, h)
+            dbgBitmap(context, "crop", crop)
+        }
         val acc = FloatArray(w * h)
         var any = false
         val guide by lazy { grayGuide(crop, w, h) }
-        for (lobe in lobes) {
+        for ((li, lobe) in lobes.withIndex()) {
             val flood = runCatching { BubbleFloodExtractor.mask(crop, lobe, exp, w, h) }.getOrNull()
             var alpha = flood
+            if (dbg) dbgAlpha(context, "lobe${li}_flood", flood, w, h)
             if (alpha == null) {
                 // Tier-2: SAM, then snap its ~few-px-off boundary onto the real ink edge.
-                alpha = samLobeAlpha(context, page, streamFn, lobe, exp, w, h)
-                    ?.let { snapToEdges(it, guide, w, h) }
+                val sam = samLobeAlpha(context, page, streamFn, lobe, exp, w, h)
+                if (dbg) dbgAlpha(context, "lobe${li}_sam", sam, w, h)
+                alpha = sam?.let { snapToEdges(it, guide, w, h) }
+                if (dbg) dbgAlpha(context, "lobe${li}_sam_snapped", alpha, w, h)
             }
             if (alpha != null) {
                 BubbleFloodExtractor.orInto(acc, alpha)
@@ -289,12 +307,131 @@ object BubbleExtractor {
             }
         }
         if (!any) return null
+        if (dbg) dbgAlpha(context, "composite_lobes", acc, w, h)
+
+        // A truly linked balloon is one connected shape, but per-lobe masks meet only where the
+        // lobes happen to touch. Glue them with a single EdgeSAM call on the *union* box — SAM
+        // over-connects a wide box, so its mask spans the pinch necks — kept only inside the narrow
+        // bridge zones between adjacent lobes, so none of SAM's looser outer boundary leaks in.
+        if (bubble.lobes != null && bubble.lobes.size > 1) {
+            val bridge = bridgeZones(bubble.lobes, exp, w, h)
+            if (bridge != null) {
+                val union = samLobeAlpha(context, page, streamFn, bubble.rect, exp, w, h)
+                if (dbg) dbgAlpha(context, "union_sam", union, w, h)
+                if (union != null) {
+                    for (i in acc.indices) if (bridge[i] && union[i] >= 0.5f && acc[i] < 1f) acc[i] = 1f
+                }
+            }
+        }
+
+        // Clip to a rounded box around the lobes: a balloon sitting against a panel frame can flood /
+        // segment into the gutter and up to the frame line, which then shows in the cutout corner.
+        // The real balloon fits inside the lobe boxes plus a small bulge; the frame is past that.
+        clipToLobeRegion(acc, lobes, exp, w, h)
+        if (dbg) dbgAlpha(context, "composite_final", acc, w, h)
+
         val out = IntArray(w * h)
         for (i in out.indices) {
             val a = (acc[i] * 255f).toInt().coerceIn(0, 255)
             out[i] = (a shl 24) or 0x00FFFFFF
         }
         return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(out, 0, w, 0, 0, w, h) }
+    }
+
+    /**
+     * Zeroes [acc] outside a rounded rectangle around the lobe boxes (union grown ~15%, corners
+     * rounded at ~30% of the short side). Removes the panel frame / gutter a mask grabbed in a
+     * corner while leaving room for the balloon's own bulge past its text box.
+     */
+    private fun clipToLobeRegion(acc: FloatArray, lobes: List<RectF>, cropNorm: RectF, w: Int, h: Int) {
+        fun sx(n: Float) = ((n - cropNorm.left) / cropNorm.width().coerceAtLeast(1e-4f) * w)
+        fun sy(n: Float) = ((n - cropNorm.top) / cropNorm.height().coerceAtLeast(1e-4f) * h)
+        var x0 = w.toFloat()
+        var y0 = h.toFloat()
+        var x1 = 0f
+        var y1 = 0f
+        for (l in lobes) {
+            x0 = min(x0, sx(l.left))
+            y0 = min(y0, sy(l.top))
+            x1 = max(x1, sx(l.right))
+            y1 = max(y1, sy(l.bottom))
+        }
+        if (x1 <= x0 || y1 <= y0) return
+        val grow = 0.10f
+        val gx0 = x0 - (x1 - x0) * grow
+        val gy0 = y0 - (y1 - y0) * grow
+        val gx1 = x1 + (x1 - x0) * grow
+        val gy1 = y1 + (y1 - y0) * grow
+        val rad = min(gx1 - gx0, gy1 - gy0) * 0.30f
+        val ix0 = gx0 + rad
+        val iy0 = gy0 + rad
+        val ix1 = gx1 - rad
+        val iy1 = gy1 - rad
+        val rad2 = rad * rad
+        for (y in 0 until h) {
+            val ry = max(max(iy0 - y, y - iy1), 0f)
+            for (x in 0 until w) {
+                val i = y * w + x
+                if (acc[i] <= 0f) continue
+                val rx = max(max(ix0 - x, x - ix1), 0f)
+                if (rx * rx + ry * ry > rad2) acc[i] = 0f
+            }
+        }
+    }
+
+    /**
+     * Mask of the "bridge zones": for every pair of adjacent lobes (a small facing gap, well
+     * overlapped on the other axis) a rectangle covering that gap plus a few px into each lobe, over
+     * the overlap band. Null if no pair qualifies. Used to confine the union-SAM glue in [compositeMask].
+     */
+    private fun bridgeZones(lobes: List<RectF>, cropNorm: RectF, w: Int, h: Int): BooleanArray? {
+        fun sx(n: Float) = ((n - cropNorm.left) / cropNorm.width().coerceAtLeast(1e-4f) * w)
+        fun sy(n: Float) = ((n - cropNorm.top) / cropNorm.height().coerceAtLeast(1e-4f) * h)
+        val mask = BooleanArray(w * h)
+        var any = false
+        val pad = max(4, min(w, h) / 40)
+        fun fill(x0: Int, y0: Int, x1: Int, y1: Int) {
+            val cx0 = x0.coerceIn(0, w - 1)
+            val cy0 = y0.coerceIn(0, h - 1)
+            val cx1 = x1.coerceIn(cx0 + 1, w)
+            val cy1 = y1.coerceIn(cy0 + 1, h)
+            for (y in cy0 until cy1) for (x in cx0 until cx1) mask[y * w + x] = true
+            any = true
+        }
+        for (i in lobes.indices) {
+            for (j in i + 1 until lobes.size) {
+                val a = lobes[i]
+                val b = lobes[j]
+                val axl = sx(a.left)
+                val axr = sx(a.right)
+                val ayt = sy(a.top)
+                val ayb = sy(a.bottom)
+                val bxl = sx(b.left)
+                val bxr = sx(b.right)
+                val byt = sy(b.top)
+                val byb = sy(b.bottom)
+                val ovX = min(axr, bxr) - max(axl, bxl)
+                val ovY = min(ayb, byb) - max(ayt, byt)
+                if (ovX > 0f) { // stacked
+                    val gap = max(ayt, byt) - min(ayb, byb)
+                    val nearer = min(ayb - ayt, byb - byt)
+                    if (gap <= nearer * 0.7f) {
+                        val lo = min(ayb, byb) - pad
+                        val hi = max(ayt, byt) + pad
+                        fill(max(axl, bxl).toInt(), lo.toInt(), min(axr, bxr).toInt(), hi.toInt())
+                    }
+                } else if (ovY > 0f) { // side by side
+                    val gap = max(axl, bxl) - min(axr, bxr)
+                    val nearer = min(axr - axl, bxr - bxl)
+                    if (gap <= nearer * 0.7f) {
+                        val lo = min(axr, bxr) - pad
+                        val hi = max(axl, bxl) + pad
+                        fill(lo.toInt(), max(ayt, byt).toInt(), hi.toInt(), min(ayb, byb).toInt())
+                    }
+                }
+            }
+        }
+        return if (any) mask else null
     }
 
     /** One lobe's EdgeSAM box-prompted alpha (0..1, `w`x`h`), or null if SAM is unavailable. */
@@ -339,8 +476,10 @@ object BubbleExtractor {
 
     /**
      * Guided-filter edge refinement: pulls the soft mask [p]'s boundary onto the guide image's own
-     * edges (the balloon's ink outline), then re-thresholds. Where the guide has no edge (borderless
-     * balloon) it degrades to a light smoothing, so it's safe to apply unconditionally.
+     * edges (the balloon's ink outline), then re-thresholds. The result is clamped to a few-px
+     * dilation of [p] so it can only tighten / nudge the edge, never balloon out to an unrelated
+     * strong edge (a panel frame the balloon sits against). Where the guide has no edge it degrades
+     * to a light smoothing, so it is safe to apply unconditionally.
      */
     private fun snapToEdges(p: FloatArray, guide: FloatArray, w: Int, h: Int): FloatArray {
         val n = w * h
@@ -362,8 +501,15 @@ object BubbleExtractor {
         }
         val mA = boxBlur(a, w, h, r)
         val mB = boxBlur(b, w, h, r)
+        // Allow-band: p thresholded and blurred by ~2r, kept where it's still non-zero = a cheap dilation.
+        val hard = FloatArray(n) { if (p[it] >= 0.5f) 1f else 0f }
+        val allow = boxBlur(hard, w, h, 2 * r + 1)
         val out = FloatArray(n)
         for (i in 0 until n) {
+            if (allow[i] < 1e-3f) {
+                out[i] = 0f
+                continue
+            }
             val q = mA[i] * guide[i] + mB[i]
             out[i] = if (q >= 0.5f) 1f else 0f
         }
@@ -391,6 +537,100 @@ object BubbleExtractor {
             }
         }
         return dst
+    }
+
+    // ---- debug dump: `adb shell setprop log.tag.BZDump VERBOSE`, files under
+    //      getExternalFilesDir("bzdump"); `adb pull /sdcard/Android/data/<pkg>/files/bzdump` ----
+
+    @Volatile private var dbgId = ""
+
+    private fun dbgDir(context: Context?): File? =
+        context?.getExternalFilesDir("bzdump")?.also { it.mkdirs() }
+
+    private fun dbgLog(bubble: Bubble, exp: RectF, w: Int, h: Int) {
+        dbgId = System.currentTimeMillis().toString()
+        Log.v("BZDump", "id=$dbgId rect=${bubble.rect.toShortString()} exp=${exp.toShortString()} work=${w}x$h lobes=${bubble.lobes?.size ?: 1}")
+        val lobes = bubble.lobes ?: return
+        for (i in lobes.indices) {
+            for (j in i + 1 until lobes.size) {
+                val a = lobes[i]
+                val b = lobes[j]
+                val gapY = maxOf(a.top, b.top) - minOf(a.bottom, b.bottom)
+                val gapX = maxOf(a.left, b.left) - minOf(a.right, b.right)
+                Log.v(
+                    "BZDump",
+                    "  id=$dbgId lobe$i-$j gapY=$gapY (hA=${a.height()} hB=${b.height()}) " +
+                        "gapX=$gapX (wA=${a.width()} wB=${b.width()})",
+                )
+            }
+        }
+    }
+
+    private fun dbgBitmap(context: Context?, tag: String, bmp: Bitmap) {
+        val dir = dbgDir(context) ?: return
+        runCatching {
+            FileOutputStream(File(dir, "${dbgId}_$tag.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+    }
+
+    private fun dbgAlpha(context: Context?, tag: String, a: FloatArray?, w: Int, h: Int) {
+        a ?: return
+        val dir = dbgDir(context) ?: return
+        val px = IntArray(w * h) {
+            val v = (a[it] * 255f).toInt().coerceIn(0, 255)
+            (0xFF shl 24) or (v shl 16) or (v shl 8) or v
+        }
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply { setPixels(px, 0, w, 0, 0, w, h) }
+        runCatching {
+            FileOutputStream(File(dir, "${dbgId}_$tag.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        }
+        bmp.recycle()
+    }
+
+    /**
+     * Boundary trace of every opaque blob in [inside] (each ≥ 16 cells), one closed pixel-centre
+     * polygon per blob, so a linked balloon whose lobes stay disconnected still gets an outline on
+     * each. Order follows row-major discovery of the blobs.
+     */
+    internal fun traceAllContours(inside: BooleanArray, w: Int, h: Int): List<FloatArray> {
+        val work = inside.copyOf()
+        val out = ArrayList<FloatArray>()
+        val q = ArrayDeque<Int>()
+        val dx4 = intArrayOf(1, -1, 0, 0)
+        val dy4 = intArrayOf(0, 0, 1, -1)
+        while (true) {
+            var seed = -1
+            for (i in work.indices) {
+                if (work[i]) {
+                    seed = i
+                    break
+                }
+            }
+            if (seed < 0) break
+            val comp = BooleanArray(work.size)
+            work[seed] = false
+            comp[seed] = true
+            q.addLast(seed)
+            var area = 0
+            while (q.isNotEmpty()) {
+                val i = q.removeFirst()
+                area++
+                val x = i % w
+                val y = i / w
+                for (d in 0 until 4) {
+                    val nx = x + dx4[d]
+                    val ny = y + dy4[d]
+                    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue
+                    val ni = ny * w + nx
+                    if (!work[ni]) continue
+                    work[ni] = false
+                    comp[ni] = true
+                    q.addLast(ni)
+                }
+            }
+            if (area >= 16) traceContour(comp, w, h)?.let { out.add(it) }
+        }
+        return out
     }
 
     /**

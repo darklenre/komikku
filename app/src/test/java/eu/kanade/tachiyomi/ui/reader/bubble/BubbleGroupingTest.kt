@@ -8,14 +8,14 @@ class BubbleGroupingTest {
     private fun box(l: Float, t: Float, r: Float, b: Float) = floatArrayOf(l, t, r, b)
 
     // args mirror BubbleDetection.LINK_OVERLAP_FRAC / LINK_STACK_GAP_FRAC / LINK_SIDE_GAP_FRAC
-    private fun group(boxes: List<FloatArray>) = groupLinked(boxes, 0.5f, 0.35f, 0.16f)
+    private fun group(boxes: List<FloatArray>) = groupLinked(boxes, 0.5f, 0.40f, 0.35f)
 
     @Test
-    fun `three vertically stacked aligned lobes collapse into one group`() {
+    fun `three nearly touching stacked lobes collapse into one group`() {
         val boxes = listOf(
-            box(0.10f, 0.60f, 0.30f, 0.70f),
-            box(0.11f, 0.71f, 0.31f, 0.81f),
-            box(0.10f, 0.82f, 0.29f, 0.92f),
+            box(0.10f, 0.60f, 0.30f, 0.705f),
+            box(0.11f, 0.705f, 0.31f, 0.81f),
+            box(0.10f, 0.815f, 0.29f, 0.92f), // ~0.5% gap = within 12% of the 10.5%-tall lobe
         )
         val groups = group(boxes)
         assertEquals(1, groups.size)
@@ -23,12 +23,21 @@ class BubbleGroupingTest {
     }
 
     @Test
-    fun `two horizontally linked lobes collapse into one group`() {
+    fun `two touching horizontally linked lobes collapse into one group`() {
         val boxes = listOf(
-            box(0.10f, 0.30f, 0.28f, 0.45f),
-            box(0.29f, 0.31f, 0.50f, 0.46f),
+            box(0.10f, 0.30f, 0.285f, 0.45f),
+            box(0.29f, 0.31f, 0.50f, 0.46f), // ~0.5% gap on a 18.5%-wide lobe
         )
         assertEquals(1, group(boxes).size)
+    }
+
+    @Test
+    fun `stacked lobes with a real gap stay separate`() {
+        val boxes = listOf(
+            box(0.10f, 0.30f, 0.30f, 0.40f),
+            box(0.10f, 0.46f, 0.30f, 0.56f), // 6% gap on a 10%-tall lobe = 60% > 12%
+        )
+        assertEquals(2, group(boxes).size)
     }
 
     @Test

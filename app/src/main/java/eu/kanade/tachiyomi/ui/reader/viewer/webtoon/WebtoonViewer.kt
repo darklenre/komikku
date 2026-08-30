@@ -23,7 +23,6 @@ import eu.kanade.tachiyomi.ui.reader.bubble.BubbleHit
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
 import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
 import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
-import eu.kanade.tachiyomi.ui.reader.bubble.mergeLinked
 import eu.kanade.tachiyomi.ui.reader.model.ChapterTransition
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.model.ViewerChapters
@@ -393,7 +392,7 @@ class WebtoonViewer(
     // Cached bubbles for [page], linked lobes merged, reading order (vertical); rects 0..1. Null if not ready.
     private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
-        return BubbleReadingOrder.sort(mergeLinked(bubbles), ReadingDirection.VERTICAL)
+        return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL)
     }
 
     // If the touch lands inside a detected bubble on [page], enter Bubble Zoom on that page's
