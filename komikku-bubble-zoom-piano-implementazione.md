@@ -87,7 +87,7 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 
 ### Fase 1 — polish a basso rischio — **fatta**
 
-- [x] **Animazione d'ingresso**: `BubbleZoomOverlayView` interpola il cutout FLOATING dal rect on-page della nuvoletta al centro (200 ms, ease-out + fade). Start-rect via `ReaderPageImageView.sourceToViewRect` nuovo; se la SSIV non è pronta appare di colpo (fallback).
+- [x] **Animazione ingresso/uscita**: `BubbleZoomOverlayView` interpola il cutout FLOATING tra il rect on-page della nuvoletta e il centro — ingresso 200 ms ease-out + fade-in, uscita 160 ms ease-in + fade-out (anche del backdrop) via `exit(animate = true)` da tap/double-tap/back. Start/end-rect via `ReaderPageImageView.sourceToViewRect` nuovo; fallback immediato se la SSIV non è pronta o su page-turn/teardown viewer (`exit()` senza animate).
 - [x] **Override per-manga** (`viewerFlags` bit 6-7, mask `0xC0`): `BubbleZoomOverride { DEFAULT, ENABLED, DISABLED }`, `SetMangaViewerFlags.awaitSetBubbleZoom`, `Manga.bubbleZoomForced`. `ViewerConfig.bubbleZoomEnabled` = `mangaOverride ?: global`; applicato in `updateViewer()`. UI: chip row in `ReadingModePage` ("per questa serie"), gated da `isSupported`.
 - [x] **Quick toggle in-reader**: `ReaderBottomButton.BubbleZoom` ("bz") → icona nella bottom bar (opt-in dal picker), togglea `bubble_zoom` + toast on/off; nascosta se il device non supporta.
 - [x] Warmup più mirato: `BubbleDetection.prewarmSam` salta l'encode di background se `PowerManager.isPowerSaveMode` o `currentThermalStatus ≥ MODERATE`; già limitato ai 2 warmup più recenti in Fase 0 (≈ pagina corrente + successiva). Il cutout interattivo gira comunque.
