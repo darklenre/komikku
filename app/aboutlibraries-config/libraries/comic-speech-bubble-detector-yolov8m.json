@@ -2,7 +2,7 @@
   "uniqueId": "com.ogkalu:comic-speech-bubble-detector-yolov8m",
   "artifactVersion": "21d5af0a",
   "name": "comic-speech-bubble-detector-yolov8m",
-  "description": "Speech-bubble detection model (YOLOv8m) by ogkalu, bundled as an int8 ONNX/TFLite export in app/src/main/assets/models/ for the reader's Bubble Zoom feature.",
+  "description": "Speech-bubble detection model (YOLOv8m) by ogkalu, bundled as an int8 TFLite export in app/src/main/assets/models/ for the reader's Bubble Zoom feature (fast detection engine).",
   "website": "https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m",
   "developers": [
     { "name": "ogkalu" }

@@ -9,6 +9,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.os.SystemClock
 import android.util.AttributeSet
+import android.util.Size
 import android.view.GestureDetector
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -45,8 +46,11 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private var target: ReaderPageImageView? = null
     private var currentPage: ReaderPage? = null
     private var rawBubbles: List<Bubble> = emptyList()
+    /** [rawBubbles]' rects, normalised 0..1 of the source image. */
     private var bubbleRects: List<RectF> = emptyList()
-    private var extractedBitmaps: MutableMap<Int, Bitmap?> = mutableMapOf()
+    /** Source-image size in px, for converting the normalised rects when a px rect is needed. */
+    private var sourceSize: Size = Size(0, 0)
+    private val extractedBitmaps: MutableMap<Int, Bitmap?> = mutableMapOf()
     private var zoomStyle = ZoomStyle.IN_PLACE
 
     private var index = 0
@@ -56,8 +60,11 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private var hint: String? = null
     private var hintUntil = 0L
 
-    private val extractScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Single-threaded: bubble cutouts (esp. the SAM path) must not pile up while the user swipes.
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val extractScope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
     private var extractJob: Job? = null
+    private var prefetchJob: Job? = null
 
     val isActive: Boolean get() = isVisible && target != null
 
@@ -116,6 +123,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         page: ReaderPage,
         bubbles: List<Bubble>,
         startIndex: Int,
+        sourceSize: Size,
         style: ZoomStyle = ZoomStyle.IN_PLACE,
         backdrop: Boolean = true,
         hint: String? = null,
@@ -133,6 +141,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         this.currentPage = page
         this.rawBubbles = bubbles
         this.bubbleRects = bubbles.map { it.rect }
+        this.sourceSize = sourceSize
         this.zoomStyle = style
         this.backdropEnabled = backdrop
         this.extractedBitmaps.clear()
@@ -157,6 +166,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         }
         target?.setGestureZoomEnabled(true)
         extractJob?.cancel()
+        prefetchJob?.cancel()
         val cb = onExitListener
         target = null
         currentPage = null
@@ -199,26 +209,34 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         val rect = bubbleRects.getOrNull(index) ?: return
 
         if (zoomStyle == ZoomStyle.IN_PLACE) {
-            t.post { t.focusOnRect(rect) }
+            val px = rect.scaledToPx()
+            t.post { t.focusOnRect(px) }
         } else {
             requestExtraction(index)
-            // Prefetch adjacent bubbles in background for instantaneous swipe
+            // One-ahead prefetch only (reading direction); the extractor runs single-threaded so this
+            // just queues behind the current one and never floods.
             if (index + 1 < rawBubbles.size) prefetchExtraction(index + 1)
-            if (index - 1 >= 0) prefetchExtraction(index - 1)
         }
         invalidate()
     }
+
+    /** This normalised rect in source-image px. */
+    private fun RectF.scaledToPx() = RectF(
+        left * sourceSize.width,
+        top * sourceSize.height,
+        right * sourceSize.width,
+        bottom * sourceSize.height,
+    )
 
     private fun requestExtraction(idx: Int) {
         if (extractedBitmaps.containsKey(idx)) return
         val p = currentPage ?: return
         val bubble = rawBubbles.getOrNull(idx) ?: return
-        val size = target?.sourceImageSize()
         val t = target
 
         extractJob?.cancel()
         extractJob = extractScope.launch {
-            val bmp = extractBubbleBitmap(p, bubble, size, t)
+            val bmp = extractBubbleBitmap(p, bubble, t)
             withContext(Dispatchers.Main) {
                 extractedBitmaps[idx] = bmp
                 invalidate()
@@ -230,11 +248,11 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         if (extractedBitmaps.containsKey(idx)) return
         val p = currentPage ?: return
         val bubble = rawBubbles.getOrNull(idx) ?: return
-        val size = target?.sourceImageSize()
         val t = target
 
-        extractScope.launch {
-            val bmp = extractBubbleBitmap(p, bubble, size, t)
+        prefetchJob?.cancel()
+        prefetchJob = extractScope.launch {
+            val bmp = extractBubbleBitmap(p, bubble, t)
             withContext(Dispatchers.Main) {
                 if (isActive && !extractedBitmaps.containsKey(idx)) {
                     extractedBitmaps[idx] = bmp
@@ -245,33 +263,15 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         }
     }
 
-    private fun extractBubbleBitmap(
-        p: ReaderPage,
-        bubble: Bubble,
-        size: android.util.Size?,
-        t: ReaderPageImageView?,
-    ): Bitmap? {
-        val normalised = if (size != null && size.width > 0 && size.height > 0) {
-            Bubble(
-                RectF(
-                    bubble.rect.left / size.width,
-                    bubble.rect.top / size.height,
-                    bubble.rect.right / size.width,
-                    bubble.rect.bottom / size.height,
-                ),
-                bubble.confidence,
-                bubble.maskBitmap,
-            )
-        } else {
-            bubble
-        }
-        return BubbleExtractor.extractBubble(p, normalised, size)
-            ?: t?.cropSourceRect(bubble.rect)
-    }
+    /** Bubble rects are normalised; [BubbleExtractor] takes them as-is, the crop fallback needs px. */
+    private fun extractBubbleBitmap(p: ReaderPage, bubble: Bubble, t: ReaderPageImageView?): Bitmap? =
+        BubbleExtractor.extractBubble(p, bubble, sourceSize.takeIf { it.width > 0 && it.height > 0 })
+            ?: t?.cropSourceRect(bubble.rect.scaledToPx())
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         extractJob?.cancel()
+        prefetchJob?.cancel()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -304,6 +304,8 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 // The bitmap is already cut to the bubble shape (transparent around it): draw it
                 // straight onto the backdrop, no card behind it.
                 canvas.drawBitmap(bmp, null, destRect, bitmapPaint)
+            } else if (!extractedBitmaps.containsKey(index)) {
+                canvas.drawText("…", width / 2f, height / 2f, counterPaint)
             }
         }
 

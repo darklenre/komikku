@@ -234,6 +234,9 @@ class WebtoonPageHolder(
             detectionBitmap?.let { bitmap ->
                 BubbleDetection.enqueue(context, bubbleKeyFor(currentPage), bitmap)
             }
+            if (viewer.config.bubbleZoomEnabled) {
+                BubbleDetection.prewarmSam(context, bubbleKeyFor(currentPage), streamFn)
+            }
             // KMK <--
         } catch (e: Throwable) {
             detectionBitmap?.recycle()

@@ -1,26 +1,39 @@
-Bubble Zoom detection model
-===========================
+Bubble Zoom models
+==================
 
-This directory bundles a speech-bubble detection model used by the reader's
-"Bubble Zoom" feature.
+This directory bundles the on-device models used by the reader's "Bubble Zoom"
+feature. All are redistributed under the Apache License 2.0 (see LICENSE).
 
-Source model
-------------
+--------------------------------------------------------------------------------
+1. Speech-bubble detection
+--------------------------------------------------------------------------------
   Name:     comic-speech-bubble-detector-yolov8m
   Author:   ogkalu
   Upstream: https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m
   Commit:   21d5af0a9c69bb522b9968d6cc915f898d71a264
-  License:  Apache License 2.0 (see the LICENSE file in this directory)
+  Licence:  Apache License 2.0
 
-Bundled artifact(s)
--------------------
-  bubble_detector.onnx   - int8 ONNX export of the model above, produced with
-                           Ultralytics `YOLO(...).export(format="onnx", imgsz=640,
-                           int8=True)` on a mixed manga/comic calibration set.
-  bubble_detector.tflite - int8 TensorFlow Lite / LiteRT export of the model above,
-                           produced with Ultralytics `YOLO(...).export(format="tflite",
-                           imgsz=640, int8=True)` on the same calibration set.
+  Bundled artifact:
+    bubble_detector_ogkalu.tflite
+      int8 TensorFlow Lite / LiteRT export, produced with Ultralytics
+      YOLO(...).export(format="tflite", imgsz=640, int8=True, nms=False)
+      on a mixed manga/comic calibration set.
 
-The exports are derivative works of the source model and are redistributed
-under the same Apache License 2.0. No changes were made to the model
-architecture or trained weights beyond quantization for on-device inference.
+--------------------------------------------------------------------------------
+2. Cutout refinement (SAM)
+--------------------------------------------------------------------------------
+  Name:     MobileSAM
+  Authors:  Chaoning Zhang et al. (Kyung Hee University)
+  Upstream: https://github.com/ChaoningZhang/MobileSAM
+  Licence:  Apache License 2.0
+
+  Bundled artifacts:
+    sam_encoder.tflite   TinyViT image encoder, fp32 TFLite export.
+    sam_decoder.tflite   box-prompted mask decoder, fp32 TFLite export.
+
+--------------------------------------------------------------------------------
+
+All bundled artifacts are derivative works of their respective source models,
+redistributed under the same licence as their source. No changes were made to
+model architecture or trained weights beyond quantization / format conversion
+for on-device inference.

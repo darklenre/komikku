@@ -237,21 +237,10 @@ abstract class PagerViewer(
     private val bubbleReadingDirection
         get() = if (this is R2LPagerViewer) ReadingDirection.RTL else ReadingDirection.LTR
 
-    /** Cached bubbles for [page], ordered and scaled to source-image px; null if not ready. */
-    private fun bubbleDetections(page: ReaderPage, size: Size): List<Bubble>? {
+    /** Cached bubbles for [page] in reading order; rects stay normalised 0..1. Null if not ready. */
+    private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
-        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection).map {
-            Bubble(
-                rect = RectF(
-                    it.rect.left * size.width,
-                    it.rect.top * size.height,
-                    it.rect.right * size.width,
-                    it.rect.bottom * size.height,
-                ),
-                confidence = it.confidence,
-                maskBitmap = it.maskBitmap,
-            )
-        }
+        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection)
     }
 
     /**
@@ -267,8 +256,13 @@ abstract class PagerViewer(
         val holder = getPageHolder(page) ?: return false
         val size = holder.sourceImageSize() ?: return false
         val src = holder.viewToSourceCoord(viewX, viewY) ?: return false
-        val bubbles = bubbleDetections(page, size) ?: return false
-        val hit = bubbles.indexOfFirst { it.rect.contains(src.x, src.y) }
+        val bubbles = bubbleDetections(page) ?: run {
+            if (BubbleDetection.isPending(bubbleKeyFor(page))) activity.notifyBubbleZoomDetecting()
+            return false
+        }
+        val nx = src.x / size.width
+        val ny = src.y / size.height
+        val hit = bubbles.indexOfFirst { it.rect.contains(nx, ny) }
         if (hit < 0) return false
         activity.enterBubbleZoom(
             target = holder,
@@ -276,6 +270,7 @@ abstract class PagerViewer(
             bubbles = bubbles,
             startIndex = hit,
             style = style,
+            sourceSize = size,
         )
         return true
     }
@@ -301,10 +296,16 @@ abstract class PagerViewer(
                 if (now != null && now != before) {
                     val holder = getPageHolder(now)
                     val size = holder?.sourceImageSize()
-                    val bubbles = if (size != null) bubbleDetections(now, size) else null
-                    if (holder != null && bubbles != null) {
+                    val bubbles = bubbleDetections(now)
+                    if (holder != null && size != null && bubbles != null) {
                         pendingBubbleZoomPoll = null
-                        activity.enterBubbleZoom(holder, now, bubbles, if (forward) 0 else bubbles.lastIndex)
+                        activity.enterBubbleZoom(
+                            holder,
+                            now,
+                            bubbles,
+                            if (forward) 0 else bubbles.lastIndex,
+                            sourceSize = size,
+                        )
                         return
                     }
                 }

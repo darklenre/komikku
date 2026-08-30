@@ -1,10 +1,13 @@
 package eu.kanade.tachiyomi.ui.reader.bubble
 
+import android.app.Application
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.BitmapRegionDecoder
 import android.graphics.Canvas
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
@@ -12,25 +15,43 @@ import android.graphics.RectF
 import android.os.Build
 import android.util.Size
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
+import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
+import java.io.InputStream
 import kotlin.math.max
 import kotlin.math.min
 
+/**
+ * Cuts a detected speech bubble out of the page image for the reader's floating Bubble Zoom.
+ *
+ * The bubble's detection box is decoded from the page stream at native resolution with a small
+ * margin, then shaped by [ReaderPreferences.bubbleZoomCroppingMethod]:
+ *  - `"none"`: a rounded rectangle.
+ *  - `"sam"`: a MobileSAM box-prompted mask ([SamRefiner]) — falls back to the rounded rectangle
+ *    when SAM is unavailable.
+ * A uniform black sticker outline is added when [ReaderPreferences.bubbleZoomOutline] is on.
+ */
 object BubbleExtractor {
 
-    /** The crop is decoded with this fraction of extra margin so the bubble's real outline
-     *  (scallops, tail) that spills past the tight detection box has room, and so the CV pass has
-     *  exterior context to find the edge against. */
+    /** Extra margin decoded around the tight detection box so scallops / the tail have room. */
     private const val CROP_MARGIN = 0.22f
 
-    /** Working resolution for the CV mask refinement. */
+    /** Working resolution the shape mask is built at before being upscaled onto the crop. */
     private const val WORK_MAX = 400
 
-    /**
-     * Extracts a speech bubble as a high-resolution [Bitmap] directly from the [page] image stream,
-     * cut to the bubble shape (neural proto mask refined against the real pixels).
-     */
+    /** Fallback sticker-outline width (percent of the cutout's short side) if the pref can't be read. */
+    private const val OUTLINE_PCT_DEFAULT = 3
+
+    /** Extracts [bubble] from [page] as a shaped, high-resolution bitmap. */
     fun extractBubble(page: ReaderPage, bubble: Bubble, sourceSize: Size?): Bitmap? {
         val streamFn = page.stream ?: return null
+
+        val prefs = runCatching { Injekt.get<ReaderPreferences>() }.getOrNull()
+        val method = prefs?.bubbleZoomCroppingMethod()?.get() ?: "sam"
+        val outline = prefs?.bubbleZoomOutline()?.get() ?: true
+        val outlinePct = prefs?.bubbleZoomOutlineWidth()?.get() ?: OUTLINE_PCT_DEFAULT
+        val context = runCatching { Injekt.get<Application>() as Context }.getOrNull()
 
         // Expand the tight detection box by a margin, clamped to the page.
         val bw = bubble.rect.width()
@@ -40,13 +61,6 @@ object BubbleExtractor {
             (bubble.rect.top - CROP_MARGIN * bh).coerceAtLeast(0f),
             (bubble.rect.right + CROP_MARGIN * bw).coerceAtMost(1f),
             (bubble.rect.bottom + CROP_MARGIN * bh).coerceAtMost(1f),
-        )
-        // Where the tight box sits inside the expanded crop, as a 0..1 fraction.
-        val inner = RectF(
-            (bubble.rect.left - exp.left) / exp.width(),
-            (bubble.rect.top - exp.top) / exp.height(),
-            (bubble.rect.right - exp.left) / exp.width(),
-            (bubble.rect.bottom - exp.top) / exp.height(),
         )
 
         val rawCropped = try {
@@ -77,15 +91,26 @@ object BubbleExtractor {
             null
         } ?: return null
 
-        return processCroppedBitmap(rawCropped, bubble, inner)
+        return processCroppedBitmap(rawCropped, bubble, method, outline, outlinePct, page, exp, streamFn, context)
     }
 
     /**
-     * Cuts [cropped] to the bubble shape. [innerFrac] is the detection box as a 0..1 fraction of
-     * [cropped] (the neural mask covers that sub-rect); when null the whole crop is used.
-     * With no neural mask (detect-only engines) the result is a plain rounded rectangle.
+     * Cuts [cropped] to the bubble shape per [method] and, when [outline] is set, adds the sticker
+     * border ([outlinePct] = its width as a percentage of the cutout's short side). [expandedCrop]
+     * is the crop's rect in 0..1 page coordinates (needed to place the page-space SAM mask). SAM
+     * degrades to a rounded rectangle when it is unavailable.
      */
-    fun processCroppedBitmap(cropped: Bitmap, bubble: Bubble, innerFrac: RectF? = null): Bitmap {
+    fun processCroppedBitmap(
+        cropped: Bitmap,
+        bubble: Bubble,
+        method: String = "sam",
+        outline: Boolean = true,
+        outlinePct: Int = OUTLINE_PCT_DEFAULT,
+        page: ReaderPage? = null,
+        expandedCrop: RectF? = null,
+        streamFn: (() -> InputStream)? = null,
+        context: Context? = null,
+    ): Bitmap {
         val cropW = cropped.width
         val cropH = cropped.height
         if (cropW <= 8 || cropH <= 8) return cropped
@@ -94,192 +119,199 @@ object BubbleExtractor {
         val canvas = Canvas(result)
         canvas.drawBitmap(cropped, 0f, 0f, null)
 
-        val mask = bubble.maskBitmap
-        if (mask == null) {
-            // Detect-only engine (ogkalu): no shape info, keep the plain rounded rectangle.
-            val r = RectF(0f, 0f, cropW.toFloat(), cropH.toFloat())
-            val rr = min(cropW, cropH) * 0.12f
-            val layer = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
-            Canvas(layer).drawRoundRect(r, rr, rr, Paint(Paint.ANTI_ALIAS_FLAG))
-            canvas.drawBitmap(
-                layer,
-                0f,
-                0f,
-                Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) },
-            )
-            layer.recycle()
-            return result
+        val shape = if (method == "sam") {
+            samShape(context, page, streamFn, bubble, expandedCrop, cropW, cropH)
+        } else {
+            null
         }
 
-        // seg engine: cut to the bubble shape. Never a rectangle — CV-refined mask, or the plain
-        // proto mask as a bubble-ish fallback.
-        val shape = runCatching { buildShapeMask(cropped, mask, innerFrac) }.getOrNull()
-            ?: runCatching { simpleProtoMask(cropW, cropH, mask, innerFrac) }.getOrNull()
-        if (shape != null) {
+        if (shape == null) {
+            applyRoundedRect(canvas, cropW, cropH)
+        } else {
+            // FILTER_BITMAP_FLAG: bilinear-upscale the low-res mask so its edge doesn't staircase.
             canvas.drawBitmap(
                 shape,
                 null,
                 RectF(0f, 0f, cropW.toFloat(), cropH.toFloat()),
-                Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) },
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                },
             )
             shape.recycle()
-            strokeAlphaEdge(result)
         }
-        return result
+        return if (outline) applyStickerOutline(result, outlinePct) else result
     }
 
-    /** Plain proto mask scaled into [innerFrac] and thresholded — bubble-shaped, never a rectangle. */
-    private fun simpleProtoMask(cropW: Int, cropH: Int, mask: Bitmap, innerFrac: RectF?): Bitmap {
-        val inner = innerFrac ?: RectF(0f, 0f, 1f, 1f)
-        val iL = (inner.left * cropW).toInt().coerceIn(0, cropW - 1)
-        val iT = (inner.top * cropH).toInt().coerceIn(0, cropH - 1)
-        val iR = (inner.right * cropW).toInt().coerceIn(iL + 1, cropW)
-        val iB = (inner.bottom * cropH).toInt().coerceIn(iT + 1, cropH)
-        val ms = Bitmap.createScaledBitmap(mask, iR - iL, iB - iT, true)
-        val out = Bitmap.createBitmap(cropW, cropH, Bitmap.Config.ARGB_8888)
-        val mpx = IntArray((iR - iL) * (iB - iT))
-        ms.getPixels(mpx, 0, iR - iL, 0, 0, iR - iL, iB - iT)
-        ms.recycle()
-        for (i in mpx.indices) mpx[i] = if ((mpx[i] ushr 24) >= 128) -0x1 else 0x00FFFFFF
-        out.setPixels(mpx, 0, iR - iL, iL, iT, iR - iL, iB - iT)
-        return out
+    /** DST_IN a 12%-radius rounded rectangle onto [canvas]. */
+    private fun applyRoundedRect(canvas: Canvas, w: Int, h: Int) {
+        val layer = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val rr = min(w, h) * 0.12f
+        Canvas(layer).drawRoundRect(RectF(0f, 0f, w.toFloat(), h.toFloat()), rr, rr, Paint(Paint.ANTI_ALIAS_FLAG))
+        canvas.drawBitmap(
+            layer,
+            0f,
+            0f,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply { xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN) },
+        )
+        layer.recycle()
     }
 
-    /** Paints a thin dark rim along the alpha boundary of [bmp] so the cut bubble reads as an outline. */
-    private fun strokeAlphaEdge(bmp: Bitmap) {
-        val w = bmp.width
-        val h = bmp.height
-        val p = IntArray(w * h)
-        bmp.getPixels(p, 0, w, 0, 0, w, h)
-        val ring = max(2, (min(w, h) * 0.012f).toInt())
-
-        val opaque = BooleanArray(w * h) { (p[it] ushr 24) >= 128 }
-        // Erode `ring` times; the rim is opaque pixels that erosion removes.
-        var cur = opaque.copyOf()
-        repeat(ring) {
-            val nxt = cur.copyOf()
-            for (y in 0 until h) {
-                for (x in 0 until w) {
-                    val i = y * w + x
-                    if (!cur[i]) continue
-                    if (x == 0 || x == w - 1 || y == 0 || y == h - 1 ||
-                        !cur[i - 1] || !cur[i + 1] || !cur[i - w] || !cur[i + w]
-                    ) {
-                        nxt[i] = false
-                    }
-                }
-            }
-            cur = nxt
-        }
-        for (i in p.indices) if (opaque[i] && !cur[i]) p[i] = 0xFF1A1A1A.toInt()
-        bmp.setPixels(p, 0, w, 0, 0, w, h)
+    /** A MobileSAM box-prompted alpha mask for this bubble, sized to the crop. Null if unavailable. */
+    private fun samShape(
+        context: Context?,
+        page: ReaderPage?,
+        streamFn: (() -> InputStream)?,
+        bubble: Bubble,
+        expandedCrop: RectF?,
+        cropW: Int,
+        cropH: Int,
+    ): Bitmap? {
+        if (context == null || page == null || streamFn == null || expandedCrop == null) return null
+        val w = min(cropW, WORK_MAX)
+        val h = max(16, (cropH.toFloat() / cropW * w).toInt())
+        return runCatching {
+            SamRefiner.shapeMask(
+                context = context,
+                pageKey = bubbleKeyFor(page),
+                streamFn = streamFn,
+                boxNorm = bubble.rect,
+                cropNorm = expandedCrop,
+                outW = w,
+                outH = h,
+            )
+        }.getOrNull()
     }
 
     /**
-     * Coarse proto [mask] (placed at [innerFrac] of the crop) refined against [cropped]'s real
-     * pixels: grow the coarse region over the bright bubble interior and one dark-outline ring,
-     * bounded to just outside the detection box so it can't leak into panel gutters. Returns an
-     * alpha mask sized to the working resolution (the caller scales it to the crop).
+     * WhatsApp/Telegram-sticker outline: a uniform solid-black border of constant width hugging the
+     * cutout, with a crisp Canvas-antialiased edge (no blur, no visible pixels). The cutout's alpha
+     * silhouette is traced to a vector contour, corner-cut smooth, then drawn as a black
+     * FILL_AND_STROKE path ([pct]% of the short side each side, round joins) with the cutout composited
+     * on top. Returns a new bitmap and recycles [bmp]; returns [bmp] unchanged if the silhouette is
+     * too small to trace.
      */
-    private fun buildShapeMask(cropped: Bitmap, mask: Bitmap, innerFrac: RectF?): Bitmap? {
-        val cw = cropped.width
-        val ch = cropped.height
-        val scale = min(1f, WORK_MAX.toFloat() / max(cw, ch))
-        val w = max(16, (cw * scale).toInt())
-        val h = max(16, (ch * scale).toInt())
+    private fun applyStickerOutline(bmp: Bitmap, pct: Int): Bitmap {
+        val w = bmp.width
+        val h = bmp.height
+        val ring = (min(w, h) * pct / 100f).coerceAtLeast(1f)
 
-        val small = Bitmap.createScaledBitmap(cropped, w, h, true)
-        val px = IntArray(w * h)
-        small.getPixels(px, 0, w, 0, 0, w, h)
-        if (small != cropped) small.recycle()
+        val alpha = IntArray(w * h)
+        bmp.getPixels(alpha, 0, w, 0, 0, w, h)
+        val inside = BooleanArray(w * h) { (alpha[it] ushr 24) >= 128 }
 
-        val lum = FloatArray(w * h)
-        for (i in px.indices) {
-            val p = px[i]
-            lum[i] = 0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)
+        val contour = traceContour(inside, w, h) ?: return bmp
+        val smooth = chaikinClosed(chaikinClosed(contour))
+        val path = Path().apply {
+            moveTo(smooth[0], smooth[1])
+            var i = 2
+            while (i < smooth.size) {
+                lineTo(smooth[i], smooth[i + 1])
+                i += 2
+            }
+            close()
         }
 
-        // Coarse seed: proto mask scaled into the inner box, thresholded.
-        val inner = innerFrac ?: RectF(0f, 0f, 1f, 1f)
-        val iL = (inner.left * w).toInt().coerceIn(0, w - 1)
-        val iT = (inner.top * h).toInt().coerceIn(0, h - 1)
-        val iR = (inner.right * w).toInt().coerceIn(iL + 1, w)
-        val iB = (inner.bottom * h).toInt().coerceIn(iT + 1, h)
-        val iw = iR - iL
-        val ih = iB - iT
-        val ms = Bitmap.createScaledBitmap(mask, iw, ih, true)
-        val mpx = IntArray(iw * ih)
-        ms.getPixels(mpx, 0, iw, 0, 0, iw, ih)
-        ms.recycle()
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawPath(
+            path,
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = 0xFF000000.toInt()
+                style = Paint.Style.FILL_AND_STROKE
+                strokeWidth = ring * 2f
+                strokeJoin = Paint.Join.ROUND
+                strokeCap = Paint.Cap.ROUND
+            },
+        )
+        canvas.drawBitmap(bmp, 0f, 0f, null)
+        bmp.recycle()
+        return out
+    }
 
-        val seed = BooleanArray(w * h)
-        var seedCount = 0
-        var seedLumSum = 0f
-        for (y in 0 until ih) {
-            for (x in 0 until iw) {
-                if ((mpx[y * iw + x] ushr 24) >= 128) {
-                    val idx = (iT + y) * w + (iL + x)
-                    seed[idx] = true
-                    seedCount++
-                    seedLumSum += lum[idx]
+    /**
+     * Moore-neighbour boundary trace of the first (row-major) opaque blob in [inside]. Returns the
+     * pixel-centre polygon (x,y pairs, closed), or null if the blob is tiny / absent.
+     */
+    private fun traceContour(inside: BooleanArray, w: Int, h: Int): FloatArray? {
+        // Moore ring, clockwise from East.
+        val dx = intArrayOf(1, 1, 0, -1, -1, -1, 0, 1)
+        val dy = intArrayOf(0, 1, 1, 1, 0, -1, -1, -1)
+        fun solid(x: Int, y: Int) = x in 0 until w && y in 0 until h && inside[y * w + x]
+
+        var sx = -1
+        var sy = -1
+        run {
+            for (y in 0 until h) {
+                for (x in 0 until w) {
+                    if (inside[y * w + x]) {
+                        sx = x
+                        sy = y
+                        return@run
+                    }
                 }
             }
         }
-        if (seedCount < 6) return null
+        if (sx < 0) return null
 
-        // Bright = the bubble interior. Bias the threshold below the seed's mean luminance.
-        val brightThr = (seedLumSum / seedCount) * 0.66f
-        // Allow the region to reach a little outside the detection box, but not far (gutter guard).
-        val slackX = (iw * 0.10f).toInt().coerceAtLeast(2)
-        val slackY = (ih * 0.10f).toInt().coerceAtLeast(2)
-        val minX = (iL - slackX).coerceAtLeast(0)
-        val maxX = (iR + slackX).coerceAtMost(w)
-        val minY = (iT - slackY).coerceAtLeast(0)
-        val maxY = (iB + slackY).coerceAtMost(h)
-        val outlinePx = max(2, (min(w, h) * 0.02f).toInt())
-
-        val region = seed.copyOf()
-        val darkDist = IntArray(w * h) // steps taken through dark pixels since the last bright one
-        val queue = ArrayDeque<Int>()
-        for (i in seed.indices) if (seed[i]) queue.addLast(i)
-
-        while (queue.isNotEmpty()) {
-            val idx = queue.removeFirst()
-            val x = idx % w
-            val y = idx / w
-            val d = darkDist[idx]
-            val neigh = intArrayOf(
-                if (x > 0) idx - 1 else -1,
-                if (x < w - 1) idx + 1 else -1,
-                if (y > 0) idx - w else -1,
-                if (y < h - 1) idx + w else -1,
-            )
-            for (n in neigh) {
-                if (n < 0 || region[n]) continue
-                val nx = n % w
-                val ny = n / w
-                if (nx < minX || nx >= maxX || ny < minY || ny >= maxY) continue
-                if (lum[n] >= brightThr) {
-                    region[n] = true
-                    darkDist[n] = 0
-                    queue.addLast(n)
-                } else if (d < outlinePx) {
-                    region[n] = true
-                    darkDist[n] = d + 1
-                    queue.addLast(n)
+        val pts = ArrayList<Float>(4096)
+        var px = sx
+        var py = sy
+        var bx = sx - 1 // backtrack: the background pixel we came from (scan order => West)
+        var by = sy
+        val maxSteps = 4 * (w + h) + 32
+        var steps = 0
+        while (true) {
+            pts.add(px + 0.5f)
+            pts.add(py + 0.5f)
+            var bi = 0
+            for (k in 0 until 8) {
+                if (px + dx[k] == bx && py + dy[k] == by) {
+                    bi = k
+                    break
                 }
             }
+            var foundIdx = -1
+            var prevX = bx
+            var prevY = by
+            for (k in 1..8) {
+                val d = (bi + k) and 7
+                val cx = px + dx[d]
+                val cy = py + dy[d]
+                if (solid(cx, cy)) {
+                    foundIdx = d
+                    break
+                }
+                prevX = cx
+                prevY = cy
+            }
+            if (foundIdx < 0) break // isolated pixel
+            bx = prevX
+            by = prevY
+            px += dx[foundIdx]
+            py += dy[foundIdx]
+            if (px == sx && py == sy) break
+            if (++steps > maxSteps) break
         }
+        return if (pts.size >= 24) pts.toFloatArray() else null
+    }
 
-        var count = 0
-        for (i in region.indices) if (region[i]) count++
-        val boxArea = iw * ih
-        if (count < boxArea * 0.15f || count > boxArea * 2f) return null
-
-        val out = IntArray(w * h)
-        for (i in out.indices) out[i] = if (region[i]) -0x1 else 0x00FFFFFF
-        return Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888).apply {
-            setPixels(out, 0, w, 0, 0, w, h)
+    /** One round of Chaikin corner-cutting on a closed polygon (x,y pairs). Quadruples the points. */
+    private fun chaikinClosed(p: FloatArray): FloatArray {
+        val n = p.size / 2
+        if (n < 4) return p
+        val out = FloatArray(n * 4)
+        var o = 0
+        for (i in 0 until n) {
+            val ax = p[i * 2]
+            val ay = p[i * 2 + 1]
+            val j = (i + 1) % n
+            val bx = p[j * 2]
+            val by = p[j * 2 + 1]
+            out[o++] = ax * 0.75f + bx * 0.25f
+            out[o++] = ay * 0.75f + by * 0.25f
+            out[o++] = ax * 0.25f + bx * 0.75f
+            out[o++] = ay * 0.25f + by * 0.75f
         }
+        return out
     }
 }
