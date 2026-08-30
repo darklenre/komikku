@@ -15,6 +15,9 @@ class ReaderSettingsScreenModel(
     readerState: StateFlow<ReaderViewModel.State>,
     val onChangeReadingMode: (ReadingMode) -> Unit,
     val onChangeOrientation: (ReaderOrientation) -> Unit,
+    // KMK -->
+    val onChangeBubbleZoom: (BubbleZoomOverride) -> Unit = {},
+    // KMK <--
     val preferences: ReaderPreferences = Injekt.get(),
 ) : ScreenModel {
 

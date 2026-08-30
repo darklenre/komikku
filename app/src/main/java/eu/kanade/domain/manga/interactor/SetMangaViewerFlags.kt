@@ -1,5 +1,6 @@
 package eu.kanade.domain.manga.interactor
 
+import eu.kanade.tachiyomi.ui.reader.setting.BubbleZoomOverride
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
 import tachiyomi.domain.manga.model.MangaUpdate
@@ -28,6 +29,18 @@ class SetMangaViewerFlags(
             ),
         )
     }
+
+    // KMK -->
+    suspend fun awaitSetBubbleZoom(id: Long, flag: Long) {
+        val manga = mangaRepository.getMangaById(id)
+        mangaRepository.update(
+            MangaUpdate(
+                id = id,
+                viewerFlags = manga.viewerFlags.setFlag(flag, BubbleZoomOverride.MASK.toLong()),
+            ),
+        )
+    }
+    // KMK <--
 
     private fun Long.setFlag(flag: Long, mask: Long): Long {
         return this and mask.inv() or (flag and mask)

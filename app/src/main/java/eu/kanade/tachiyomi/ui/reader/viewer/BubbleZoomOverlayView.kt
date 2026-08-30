@@ -66,6 +66,14 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
     private var extractJob: Job? = null
     private var prefetchJob: Job? = null
 
+    /**
+     * FLOATING entry animation: the cutout scales + fades from the bubble's on-page rect to its
+     * centered resting place. [enterAnimFrom] is the start rect in view px (null = no animation);
+     * [enterAnimStart] is 0 until the first frame that actually has a cutout to draw.
+     */
+    private var enterAnimFrom: RectF? = null
+    private var enterAnimStart = 0L
+
     val isActive: Boolean get() = isVisible && target != null
 
     private val counterPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -177,6 +185,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         onEdgeListener = null
         onExitListener = null
         hint = null
+        enterAnimFrom = null
         isVisible = false
         cb?.invoke()
     }
@@ -212,6 +221,9 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
             val px = rect.scaledToPx()
             t.post { t.focusOnRect(px) }
         } else {
+            // Start the cutout from where the bubble sits on the page, then animate it to centre.
+            enterAnimFrom = t.sourceToViewRect(rect.scaledToPx())
+            enterAnimStart = 0L
             requestExtraction(index)
             // One-ahead prefetch only (reading direction); the extractor runs single-threaded so this
             // just queues behind the current one and never floods.
@@ -299,11 +311,29 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 val drawH = bmp.height * scale
                 val drawL = (width - drawW) / 2f
                 val drawT = (height - drawH) / 2f
-                val destRect = RectF(drawL, drawT, drawL + drawW, drawT + drawH)
+                val finalRect = RectF(drawL, drawT, drawL + drawW, drawT + drawH)
 
                 // The bitmap is already cut to the bubble shape (transparent around it): draw it
                 // straight onto the backdrop, no card behind it.
-                canvas.drawBitmap(bmp, null, destRect, bitmapPaint)
+                val from = enterAnimFrom
+                if (from != null) {
+                    if (enterAnimStart == 0L) enterAnimStart = SystemClock.uptimeMillis()
+                    val lin = ((SystemClock.uptimeMillis() - enterAnimStart) / ENTER_ANIM_MS.toFloat())
+                        .coerceIn(0f, 1f)
+                    val f = 1f - (1f - lin) * (1f - lin) // ease-out quad
+                    val r = RectF(
+                        from.left + (finalRect.left - from.left) * f,
+                        from.top + (finalRect.top - from.top) * f,
+                        from.right + (finalRect.right - from.right) * f,
+                        from.bottom + (finalRect.bottom - from.bottom) * f,
+                    )
+                    bitmapPaint.alpha = (f * 255f).toInt().coerceIn(0, 255)
+                    canvas.drawBitmap(bmp, null, r, bitmapPaint)
+                    bitmapPaint.alpha = 255
+                    if (lin < 1f) postInvalidateOnAnimation() else enterAnimFrom = null
+                } else {
+                    canvas.drawBitmap(bmp, null, finalRect, bitmapPaint)
+                }
             } else if (!extractedBitmaps.containsKey(index)) {
                 canvas.drawText("…", width / 2f, height / 2f, counterPaint)
             }
@@ -326,5 +356,6 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
 
     private companion object {
         const val HINT_DURATION_MS = 2500L
+        const val ENTER_ANIM_MS = 200L
     }
 }

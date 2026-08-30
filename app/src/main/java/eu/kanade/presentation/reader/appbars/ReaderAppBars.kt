@@ -99,6 +99,10 @@ fun ReaderAppBars(
     onClickPageLayout: () -> Unit,
     onClickShiftPage: () -> Unit,
     // SY <--
+    // KMK -->
+    bubbleZoomEnabled: Boolean = false,
+    onClickBubbleZoom: (() -> Unit)? = null,
+    // KMK <--
 ) {
     val isRtl = viewer is R2LPagerViewer
     val backgroundColor = MaterialTheme.colorScheme
@@ -275,6 +279,10 @@ fun ReaderAppBars(
                     onClickPageLayout = onClickPageLayout,
                     onClickShiftPage = onClickShiftPage,
                     // SY <--
+                    // KMK -->
+                    bubbleZoomEnabled = bubbleZoomEnabled,
+                    onClickBubbleZoom = onClickBubbleZoom,
+                    // KMK <--
                 )
             }
         }

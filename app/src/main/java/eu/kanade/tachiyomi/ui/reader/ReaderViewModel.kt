@@ -11,6 +11,7 @@ import androidx.lifecycle.viewModelScope
 import eu.kanade.domain.base.BasePreferences
 import eu.kanade.domain.chapter.model.toDbChapter
 import eu.kanade.domain.manga.interactor.SetMangaViewerFlags
+import eu.kanade.domain.manga.model.bubbleZoomForced
 import eu.kanade.domain.manga.model.readerOrientation
 import eu.kanade.domain.manga.model.readingMode
 import eu.kanade.domain.source.interactor.GetIncognitoState
@@ -1077,6 +1078,30 @@ class ReaderViewModel @JvmOverloads constructor(
             }
         }
     }
+
+    // KMK -->
+    /** null = follow the global `bubble_zoom` preference; true/false = forced for this series. */
+    fun getMangaBubbleZoomOverride(): Boolean? = manga?.bubbleZoomForced
+
+    fun setMangaBubbleZoomOverride(override: eu.kanade.tachiyomi.ui.reader.setting.BubbleZoomOverride) {
+        val manga = manga ?: return
+        viewModelScope.launchIO {
+            setMangaViewerFlags.awaitSetBubbleZoom(manga.id, override.flagValue.toLong())
+            val currChapters = state.value.viewerChapters
+            if (currChapters != null) {
+                val currChapter = currChapters.currChapter
+                currChapter.requestedPage = currChapter.chapter.last_page_read
+                mutableState.update {
+                    it.copy(
+                        manga = getManga.await(manga.id),
+                        viewerChapters = currChapters,
+                    )
+                }
+                eventChannel.send(Event.ReloadViewerChapters)
+            }
+        }
+    }
+    // KMK <--
 
     // SY -->
     fun toggleCropBorders(): Boolean {

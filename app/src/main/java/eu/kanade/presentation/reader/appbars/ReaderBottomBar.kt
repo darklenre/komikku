@@ -3,6 +3,8 @@ package eu.kanade.presentation.reader.appbars
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChatBubble
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Explore
 import androidx.compose.material.icons.outlined.FormatListNumbered
 import androidx.compose.material.icons.outlined.Public
@@ -22,6 +24,7 @@ import eu.kanade.tachiyomi.ui.reader.setting.ReaderOrientation
 import eu.kanade.tachiyomi.ui.reader.setting.ReadingMode
 import kotlinx.collections.immutable.ImmutableSet
 import tachiyomi.i18n.MR
+import tachiyomi.i18n.kmk.KMR
 import tachiyomi.i18n.sy.SYMR
 import tachiyomi.presentation.core.i18n.stringResource
 
@@ -48,6 +51,10 @@ fun ReaderBottomBar(
     onClickPageLayout: () -> Unit,
     onClickShiftPage: () -> Unit,
     // SY <--
+    // KMK -->
+    bubbleZoomEnabled: Boolean = false,
+    onClickBubbleZoom: (() -> Unit)? = null,
+    // KMK <--
     modifier: Modifier = Modifier,
 ) {
     // KMK -->
@@ -178,6 +185,18 @@ fun ReaderBottomBar(
                 )
             }
         }
+
+        // KMK -->
+        if (onClickBubbleZoom != null && ReaderBottomButton.BubbleZoom.isIn(enabledButtons)) {
+            IconButton(onClick = onClickBubbleZoom) {
+                Icon(
+                    imageVector = if (bubbleZoomEnabled) Icons.Filled.ChatBubble else Icons.Outlined.ChatBubbleOutline,
+                    contentDescription = stringResource(KMR.strings.pref_bubble_zoom_enable),
+                    tint = iconColor,
+                )
+            }
+        }
+        // KMK <--
 
         IconButton(onClick = onClickSettings) {
             Icon(

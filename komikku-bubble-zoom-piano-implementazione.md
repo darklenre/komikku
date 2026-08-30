@@ -57,6 +57,8 @@
 
 UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe base `KMR` (EN) in `i18n-kmk/.../base/strings.xml`.
 
+**Override per-serie** (non è una pref): `Manga.viewerFlags` bit 6-7 (`BubbleZoomOverride.MASK = 0xC0`) — `DEFAULT` / `ENABLED` / `DISABLED`. `ViewerConfig.bubbleZoomEnabled = bubbleZoomMangaOverride ?: bubbleZoomGlobal`. Toggle rapido: `ReaderBottomButton.BubbleZoom` (opt-in).
+
 ### 1.5 Modelli & build
 
 | File | Byte | Sorgente | Licenza |
@@ -83,12 +85,12 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 - [x] Unit test funzioni pure (`app/src/test/.../bubble/`, 22 test): `letterboxOf`, `iou`, `decodeDetsNormalized` (+NMS), `BubbleReadingOrder.orderIndices` (LTR/RTL/griglia 2×2), `traceContour`, `chaikinClosed`. Refactor: `decodeDetections` splittata in core puro + wrapper `Bubble`; `BubbleReadingOrder.sort` → `orderIndices` su `Box` puro.
 - [x] Commit del working tree (`69e38ce496`) + questo giro.
 
-### Fase 1 — polish a basso rischio
+### Fase 1 — polish a basso rischio — **fatta**
 
-- [ ] **Animazione d'ingresso**: il cutout scala dalla posizione della nuvoletta sulla pagina al centro (ora appare di colpo).
-- [ ] **Override per-manga** on/off (e magari cutout method) via `viewerFlags` + `SetMangaViewerFlags`, nel bottom-sheet impostazioni serie.
-- [ ] **Quick toggle in-reader** (`ReaderBottomButton`): accendere/spegnere senza uscire dalla lettura.
-- [ ] Warmup più mirato: solo pagina corrente + successiva (non tutto il preload), skip su batteria bassa / thermal throttle.
+- [x] **Animazione d'ingresso**: `BubbleZoomOverlayView` interpola il cutout FLOATING dal rect on-page della nuvoletta al centro (200 ms, ease-out + fade). Start-rect via `ReaderPageImageView.sourceToViewRect` nuovo; se la SSIV non è pronta appare di colpo (fallback).
+- [x] **Override per-manga** (`viewerFlags` bit 6-7, mask `0xC0`): `BubbleZoomOverride { DEFAULT, ENABLED, DISABLED }`, `SetMangaViewerFlags.awaitSetBubbleZoom`, `Manga.bubbleZoomForced`. `ViewerConfig.bubbleZoomEnabled` = `mangaOverride ?: global`; applicato in `updateViewer()`. UI: chip row in `ReadingModePage` ("per questa serie"), gated da `isSupported`.
+- [x] **Quick toggle in-reader**: `ReaderBottomButton.BubbleZoom` ("bz") → icona nella bottom bar (opt-in dal picker), togglea `bubble_zoom` + toast on/off; nascosta se il device non supporta.
+- [x] Warmup più mirato: `BubbleDetection.prewarmSam` salta l'encode di background se `PowerManager.isPowerSaveMode` o `currentThermalStatus ≥ MODERATE`; già limitato ai 2 warmup più recenti in Fase 0 (≈ pagina corrente + successiva). Il cutout interattivo gira comunque.
 
 ### Fase 2 — profondità cutout
 

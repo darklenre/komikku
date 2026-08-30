@@ -20,7 +20,15 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
     var longTapEnabled = true
 
     // KMK -->
-    var bubbleZoomEnabled = false
+    /** The global `bubble_zoom` preference; [bubbleZoomEnabled] is what the reader should honour. */
+    var bubbleZoomGlobal = false
+
+    /** Per-manga override: null = follow [bubbleZoomGlobal], true/false = force. Set on viewer load. */
+    var bubbleZoomMangaOverride: Boolean? = null
+
+    val bubbleZoomEnabled: Boolean
+        get() = bubbleZoomMangaOverride ?: bubbleZoomGlobal
+
     var bubbleZoomInPlaceGesture = "long_tap"
     var bubbleZoomFloatingGesture = "double_tap"
 
@@ -81,7 +89,7 @@ abstract class ViewerConfig(readerPreferences: ReaderPreferences, private val sc
 
         // KMK -->
         readerPreferences.bubbleZoom()
-            .register({ bubbleZoomEnabled = it })
+            .register({ bubbleZoomGlobal = it })
         readerPreferences.bubbleZoomInPlaceGesture()
             .register({ bubbleZoomInPlaceGesture = it })
         readerPreferences.bubbleZoomFloatingGesture()
