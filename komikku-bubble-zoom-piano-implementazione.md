@@ -101,9 +101,9 @@ UI: `SettingsReaderScreen.getBubbleZoomGroup()` dopo `getActionsGroup`. Stringhe
 ### Fase 3 — profondità detection
 
 - [ ] **Tiling per webtoon**: strisce alte → detection per-tile + merge (ora un solo pass downscalato → nuvolette ~10 px).
-- [ ] Slider soglia confidence + toggle "includi caption/narration box".
-- [ ] Hit-test poligonale (usare la maschera SAM anche per il hit-test, non solo per il ritaglio).
-- [ ] Tap-to-add: long-press su zona non rilevata → cutout da box di default.
+- [x] **Slider soglia confidence**: pref `bubble_zoom_confidence` (10..60 %, default 30), letta in `BubbleDetection.detect` e passata a `BubbleDetector.detect(bitmap, confThreshold)`; cambio → `BubbleDetection.clearCache()`. (Toggle "includi caption/narration" rimandato: serve verificare la semantica delle 2 classi ogkalu sul device.)
+- [x] **Hit-test poligonale**: `BubbleHit.hitTest` — tra i rect che contengono il tocco vince quello la cui **ellisse inscritta** lo contiene (scarta gli angoli = gutter/pannello vicino), tie-break sull'area minore. Mai più stretto di `rect.contains`. Niente maschera SAM (il detector è detect-only → nessuna maschera al momento del gesto; la versione SAM richiederebbe maschere in fase di detection).
+- [x] **Tap-to-add** dietro pref `bubble_zoom_tap_anywhere` (**default off**, `ViewerConfig.bubbleZoomTapAnywhere`): quando on, il gesto FLOATING che non colpisce nessuna bubble sintetizza una `Bubble` (`BubbleHit.syntheticBubbleAt`: box centrato sul tocco, `confidence = 1f`, dimensione = mediana delle bubble della pagina · fallback 22%×14%) ed entra in FLOATING con quella; SAM la rifinisce col box come prompt, fallback rettangolo. Pref **off** = comportamento invariato (miss → gesto nativo). Modifiche isolate al ramo `hit < 0` in `tryEnterBubbleZoom` (Pager/Webtoon); niente tocco a `BubbleExtractor`/`SamRefiner`/overlay.
 
 ### Fase 4 — performance SAM
 

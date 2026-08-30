@@ -161,6 +161,12 @@ class ReaderPreferences(
     /** Sticker-outline thickness, as a percentage of the cutout's short side (see slider range). */
     fun bubbleZoomOutlineWidth() = preferenceStore.getInt("bubble_zoom_outline_width", 3)
     fun bubbleZoomFloatingBackdrop() = preferenceStore.getBoolean("bubble_zoom_floating_backdrop", true)
+
+    /** Minimum detector confidence (percent) for a box to count as a bubble; see slider range. */
+    fun bubbleZoomConfidence() = preferenceStore.getInt("bubble_zoom_confidence", 30)
+
+    /** When a tap misses every detected bubble, zoom a default-sized area around it instead. */
+    fun bubbleZoomTapAnywhere() = preferenceStore.getBoolean("bubble_zoom_tap_anywhere", false)
     // KMK <--
 
     fun readWithVolumeKeys() = preferenceStore.getBoolean("reader_volume_keys", false)
@@ -282,6 +288,9 @@ class ReaderPreferences(
 
         const val BUBBLE_ZOOM_OUTLINE_WIDTH_MIN = 1
         const val BUBBLE_ZOOM_OUTLINE_WIDTH_MAX = 8
+
+        const val BUBBLE_ZOOM_CONFIDENCE_MIN = 10
+        const val BUBBLE_ZOOM_CONFIDENCE_MAX = 60
 
         const val MILLI_CONVERSION = 100
 

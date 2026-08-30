@@ -61,6 +61,11 @@ object BubbleDetection {
     /** True while detection for [key] has been requested but no result (even an empty one) is cached yet. */
     fun isPending(key: String): Boolean = cache.get(key) == null
 
+    /** Drops all cached detections so the next page bind re-runs the detector (e.g. after the confidence changed). */
+    fun clearCache() = cache.evictAll()
+
+    private const val DEFAULT_CONFIDENCE_PERCENT = 30
+
     private val detectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
@@ -80,11 +85,14 @@ object BubbleDetection {
     /** Detects bubbles on [bitmap] (the final page image), caching under [key]. */
     suspend fun detect(context: Context, key: String, bitmap: Bitmap): List<Bubble> {
         cache.get(key)?.let { return it }
+        val confThreshold = runCatching {
+            Injekt.get<ReaderPreferences>().bubbleZoomConfidence().get()
+        }.getOrDefault(DEFAULT_CONFIDENCE_PERCENT).coerceIn(1, 100) / 100f
         _activeDetections.update { it + 1 }
         try {
             val result = detectorFor(context.applicationContext)
                 .takeIf { it.isAvailable }
-                ?.detect(bitmap)
+                ?.detect(bitmap, confThreshold)
                 ?: emptyList()
             cache.put(key, result)
             return result

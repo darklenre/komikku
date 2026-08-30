@@ -18,6 +18,7 @@ import eu.kanade.tachiyomi.data.download.DownloadManager
 import eu.kanade.tachiyomi.ui.reader.ReaderActivity
 import eu.kanade.tachiyomi.ui.reader.bubble.Bubble
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection
+import eu.kanade.tachiyomi.ui.reader.bubble.BubbleHit
 import eu.kanade.tachiyomi.ui.reader.bubble.BubbleReadingOrder
 import eu.kanade.tachiyomi.ui.reader.bubble.ReadingDirection
 import eu.kanade.tachiyomi.ui.reader.bubble.bubbleKeyFor
@@ -262,8 +263,20 @@ abstract class PagerViewer(
         }
         val nx = src.x / size.width
         val ny = src.y / size.height
-        val hit = bubbles.indexOfFirst { it.rect.contains(nx, ny) }
-        if (hit < 0) return false
+        val hit = BubbleHit.hitTest(bubbles, nx, ny)
+        if (hit < 0) {
+            // "Tap anywhere to zoom": FLOATING gesture that missed → synthesise a bubble at the tap.
+            if (!config.bubbleZoomTapAnywhere || style != BubbleZoomOverlayView.ZoomStyle.FLOATING) return false
+            activity.enterBubbleZoom(
+                target = holder,
+                page = page,
+                bubbles = listOf(BubbleHit.syntheticBubbleAt(nx, ny, bubbles)),
+                startIndex = 0,
+                style = style,
+                sourceSize = size,
+            )
+            return true
+        }
         activity.enterBubbleZoom(
             target = holder,
             page = page,
