@@ -82,6 +82,51 @@ Note emulatore: GPU delegate non disponibile → EdgeSAM su CPU 863 ms/encode (a
 
 Conclusione: **il salto di qualità viene da (1) segmentare sul crop e non sulla pagina, (2) costruire il bordo a risoluzione nativa dall'immagine, non da una maschera ingrandita, (3) usare i blocchi di testo come seed e separatori.** Nessun modello "pronto" risolve da solo F1+Q3 su tutti gli stili.
 
+### 3.3 Fase V0 — set di test e baseline misurata (17 ott)
+
+**Set** (`playground/eval/testset/`, fuori dal repo: pagine coperte da copyright): 56 pagine, 7 serie
+(Absolute Superman, Jujutsu Kaisen, Monstress, Omniscient Reader [webtoon], One Piece, PK [scansione
+italiana], Saga) → **430 nuvolette/didascalie**, 425 valutate (5 ambigue `ignore`).
+
+**Ground truth**: istanze = proposte di RT-DETR-v2 large riviste a mano pagina per pagina
+(`corrections.json`: 4 falsi positivi tolti, 5 ambigue); maschere = **SAM 2.1 hiera-large** (Apache-2.0,
+non usato da nessuna pipeline) sul crop, prompt box + punto sul proprio testo + punti negativi sul testo
+delle vicine, buchi riempiti; tutte le 430 riviste a vista, **27 marcate `mask_bad`** (chat/UI webtoon,
+fondi neri) ed escluse dalle metriche di bordo. Limite: precisione del GT ≈ 1-3 px, e il teacher è della
+famiglia SAM (possibile bias a favore di B).
+
+**Metodo** (`scripts/eval.py`): per ogni nuvoletta si simula un **tocco al centro del suo testo**, risolto
+con lo stesso hit-test dell'app (`BubbleHit.pickIndex`), e si confronta il ritaglio ottenuto con il GT.
+La v1 è misurata **eseguendo il codice Kotlin vero** sull'emulatore (`BubbleEvalActivity`, solo debug:
+decodifica come il pager, tiling come il webtoon, `BubbleDetection.detect` + `BubbleExtractor.extractBubble`).
+
+| Metodo | ok | mancate | unione | unione *non adiacente* | IoU | BF | BF≥0,85 | pixel estranei | pixel persi |
+|---|---|---|---|---|---|---|---|---|---|
+| **v1 (app, emulatore)** | 62,1 % | 1,2 % | 36,0 % | **19,8 %** | 0,68 | 0,59 | 27 % | 23,2 % | 3,9 % |
+| v4-s, nessuna fusione, rettangolo arrotondato | 95,5 % | 1,2 % | 2,1 % | 0 % | 0,64 | 0,04 | 0 % | 30,1 % | 0,4 % |
+| **B** v4-s + EdgeSAM sul crop | 94,6 % | 1,2 % | 1,9 % | 0 % | **0,90** | **0,85** | 68 % | **0,5 %** | 3,6 % |
+| B + riempimento buchi | 94,8 % | 1,2 % | 1,6 % | 0 % | 0,90 | 0,86 | 69 % | 0,7 % | 3,7 % |
+| D classico ∩ B | 90,6 % | 1,2 % | 1,9 % | 0 % | 0,84 | 0,70 | 43 % | 0,6 % | 7,2 % |
+
+*ok* = tocco sulla nuvoletta giusta, senza unione, IoU ≥ 0,5 · *unione* = il ritaglio contiene ≥ 50 % del
+testo di un'altra nuvoletta · *non adiacente* = quella nuvoletta non tocca nemmeno la nostra · *BF* =
+F-score del contorno con tolleranza max(2 px, 1 % della diagonale) · *estranei* = ritaglio fuori dal GT ·
+*persi* = GT fuori dal ritaglio (nuvoletta morsicata).
+
+Lettura:
+- **S4 confermato e quantificato**: la v1 unisce nuvolette in un tocco su tre, e in uno su cinque unisce
+  nuvolette che non si toccano (One Piece: 50 %). Togliendo `mergeLinked` e usando v4-s le unioni non
+  adiacenti vanno a **0**; il 1,6-2,1 % residuo sono nuvolette *fisicamente collegate* (decisione F2) e
+  riquadri chat del webtoon con GT `mask_bad`.
+- **S5 confermato**: la v1 porta in media il 23 % di pixel estranei (fondo, vicine, cornici); B ne porta lo 0,5 %.
+- **B batte D** sulle metriche: D è più netto sull'inchiostro (visibile a occhio su PK/manga) ma fallisce
+  su didascalie scure e riempimenti non uniformi (Absolute, webtoon). → V2 parte da **B** e usa il
+  classico solo come *raffinamento del bordo* con gate di confidenza, non come maschera principale.
+- Margine residuo per V2: BF ≥ 0,85 solo sul 69 % delle nuvolette (Q3 chiede ≥ 0,85 in media → già
+  0,86, ma One Piece è a 0,73); pixel persi 3,7 % (code e scallop tagliati, da verificare).
+- Costi v1 sull'emulatore (x86, CPU): detection mediana 916 ms/pagina, ritaglio mediano 104 ms,
+  p90 847 ms (quando parte SAM su pagina). Da rimisurare su telefono reale.
+
 ---
 
 ## 4. Panorama modelli (aggiornato ott 2026)
@@ -144,7 +189,7 @@ Mitigazione del rischio "rendering": con il **contesto attenuato** un errore di 
 
 | Fase | Contenuto | Dove | Gate |
 |---|---|---|---|
-| **V0** | Set di test: ~60 pagine miste (comic, painted, manga, webtoon, PK) con maschere ground-truth semi-automatiche (D + correzione manuale) + `eval.py` (Q1-Q6) | playground Python | set + baseline v1 misurata |
+| **V0** ✅ 17 ott | Set di test: 56 pagine / 430 nuvolette con GT (SAM 2.1-L + revisione) + `eval.py` (Q1-Q3, Q5) + harness Kotlin `BubbleEvalActivity` (debug) | playground Python | fatto, §3.3 (Q4 coda e Q6 ordine: annotazioni ancora da fare, in V2/V4) |
 | **V1** | Detector v2 (v4-s) → TFLite (onnx2tf; in alternativa ONNX Runtime Mobile) + associazione testo; rimozione `mergeLinked` | Antigravity (conversione) + Claude | Q1, Q2 ≥ v1 |
 | **V2** | Segmentazione v2 (§5) raffinata **prima in Python** fino alle soglie, poi port Kotlin; EdgeSAM spostato sul crop | Claude | Q3-Q5 |
 | **V3** | Rendering: niente outline sintetico, AA nativo, fallback F5, opzione contesto attenuato | Claude | verifica visiva + N1 |
