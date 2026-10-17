@@ -72,7 +72,10 @@ object SamRefiner {
     private val encLock = Any()
     private val decLock = Any()
 
+    @Volatile
     private var encoder: Interpreter? = null
+
+    @Volatile
     private var decoder: Interpreter? = null
     private val delegates = mutableListOf<Closeable>()
     private var encNhwc = false
@@ -164,8 +167,6 @@ object SamRefiner {
      */
     fun cropMask(context: Context, crop: Bitmap, box: RectF, foreground: Boolean): FloatArray? {
         if (!prepare(context)) return null
-        val enc = encoder ?: return null
-        val dec = decoder ?: return null
         val w = crop.width
         val h = crop.height
         if (w < 8 || h < 8) return null
@@ -173,7 +174,9 @@ object SamRefiner {
         val nw = (w * gain).roundToInt().coerceIn(1, INPUT)
         val nh = (h * gain).roundToInt().coerceIn(1, INPUT)
 
+        // The interpreters are read under their lock: [close] takes the same locks, so it can't free one mid-run.
         val embedding = synchronized(encLock) {
+            val enc = encoder ?: return null
             if (foreground) _activeEncodes.update { it + 1 }
             try {
                 val t0 = System.currentTimeMillis()
@@ -206,6 +209,7 @@ object SamRefiner {
 
         @Suppress("UNCHECKED_CAST")
         val ok = synchronized(decLock) {
+            val dec = decoder ?: return null
             runCatching { dec.runForMultipleInputsOutputs(inputs as Array<Any>, outputs) }
                 .onFailure { logcat(LogPriority.ERROR) { "SamRefiner: decoder run failed: ${it.message}" } }
                 .isSuccess
@@ -265,15 +269,20 @@ object SamRefiner {
         }
     }
 
+    /** Frees the models, waiting for an encode or decode in flight (it would otherwise run on freed memory). */
     fun close() {
         synchronized(initLock) {
-            runCatching { encoder?.close() }
-            runCatching { decoder?.close() }
-            delegates.forEach { runCatching { it.close() } }
-            delegates.clear()
-            encoder = null
-            decoder = null
-            triedInit = false
+            synchronized(encLock) {
+                synchronized(decLock) {
+                    runCatching { encoder?.close() }
+                    runCatching { decoder?.close() }
+                    delegates.forEach { runCatching { it.close() } }
+                    delegates.clear()
+                    encoder = null
+                    decoder = null
+                    triedInit = false
+                }
+            }
         }
     }
 

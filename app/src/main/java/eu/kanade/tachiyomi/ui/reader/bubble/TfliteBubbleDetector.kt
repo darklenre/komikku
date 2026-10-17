@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.RectF
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
@@ -33,10 +34,13 @@ import java.util.concurrent.Executors
  */
 class TfliteBubbleDetector(context: Context) : BubbleDetector {
 
-    private val dispatcher = Executors.newSingleThreadExecutor { r ->
+    /** Inference and [close] both run on this one thread, so the interpreter is never freed mid-run. */
+    private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "bubble-detect-tfl").apply { isDaemon = true }
-    }.asCoroutineDispatcher()
+    }
+    private val dispatcher = executor.asCoroutineDispatcher()
 
+    @Volatile
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var modelBuffer: java.nio.MappedByteBuffer? = null
@@ -111,22 +115,27 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     override val isAvailable: Boolean get() = interpreter != null
 
     override suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble> {
-        val interp = interpreter ?: return emptyList()
+        if (interpreter == null) return emptyList()
         return withContext(dispatcher) {
+            // closed while this call was queued: give up without an (empty) result that would be cached
+            val interp = interpreter ?: throw CancellationException("detector closed")
             runCatching { infer(interp, bitmap, confThreshold) }
                 .onFailure { logcat(LogPriority.ERROR) { "TfliteBubbleDetector: inference failed: ${it.message}" } }
                 .getOrDefault(emptyList())
         }
     }
 
+    /** Frees the interpreter once the inference in flight (if any) is done; returns without waiting. */
     fun close() {
         try {
-            interpreter?.close()
-            interpreter = null
-            gpuDelegate?.close()
-            gpuDelegate = null
-            modelBuffer = null
-            dispatcher.close()
+            executor.execute {
+                runCatching { interpreter?.close() }
+                interpreter = null
+                runCatching { gpuDelegate?.close() }
+                gpuDelegate = null
+                modelBuffer = null
+            }
+            executor.shutdown()
         } catch (t: Throwable) {
             logcat { "TfliteBubbleDetector: close failed: ${t.message}" }
         }

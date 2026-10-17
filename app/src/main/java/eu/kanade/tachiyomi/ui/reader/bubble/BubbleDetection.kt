@@ -269,11 +269,29 @@ object BubbleDetection {
      * and let a re-opened page skip re-detection. The detector re-initialises lazily on next use.
      */
     fun releaseDetector() {
-        synchronized(this) {
-            (detector as? TfliteBubbleDetector)?.close()
-            detector = null
+        val old = synchronized(this) { detector.also { detector = null } }
+        (old as? TfliteBubbleDetector)?.close()
+        // SAM's close waits for an encode in flight: not on the caller's (main) thread
+        detectionScope.launch { SamRefiner.close() }
+    }
+
+    /**
+     * Loads the models ahead of the first page (reader opened, or back from the background after a
+     * [releaseDetector]): creating the interpreters, GPU shader compilation included, is most of the
+     * ~1.5 s a cold first cutout costs. No-op when Bubble Zoom is off; SAM only when it is the cutout
+     * method and the device isn't saving power.
+     */
+    fun warmUp(context: Context) {
+        val prefs = runCatching { Injekt.get<ReaderPreferences>() }.getOrNull() ?: return
+        if (!prefs.bubbleZoom().get()) return
+        val appContext = context.applicationContext
+        detectionScope.launch {
+            if (!isSupported(appContext)) return@launch
+            detectorFor(appContext)
+            if (prefs.bubbleZoomCroppingMethod().get() == "sam" && !deviceUnderStress(appContext)) {
+                SamRefiner.prepare(appContext)
+            }
         }
-        SamRefiner.close()
     }
 
     private fun detectorFor(appContext: Context): BubbleDetector {

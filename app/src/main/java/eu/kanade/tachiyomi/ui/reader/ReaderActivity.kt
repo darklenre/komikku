@@ -566,10 +566,15 @@ class ReaderActivity : BaseActivity() {
         // KMK <--
     }
 
-    // KMK --> Bubble Zoom: drop the ~75 MB of detection/SAM interpreters under memory pressure
+    // KMK --> Bubble Zoom: drop the ~75 MB of detection/SAM interpreters under memory pressure. Not on
+    // TRIM_MEMORY_UI_HIDDEN (the reader just went to the background): coming back would reload them.
+    @Suppress("DEPRECATION")
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW) {
+        if (level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW ||
+            level == android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL ||
+            level >= android.content.ComponentCallbacks2.TRIM_MEMORY_BACKGROUND
+        ) {
             eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection.releaseDetector()
         }
     }
@@ -600,6 +605,9 @@ class ReaderActivity : BaseActivity() {
         // <-- AM (DISCORD)
 
         setMenuVisibility(viewModel.state.value.menuVisible)
+        // KMK --> Bubble Zoom: load the models now, not on the first tap (no-op when already loaded)
+        eu.kanade.tachiyomi.ui.reader.bubble.BubbleDetection.warmUp(this)
+        // KMK <--
     }
 
     /**
