@@ -310,9 +310,10 @@ dependencies {
 
     // KMK -->
     implementation(libs.palette.ktx)
-    implementation(libs.tensorflow.lite) // Bubble Zoom: TensorFlow Lite
-    implementation(libs.tensorflow.lite.gpu)
-    implementation(libs.tensorflow.lite.gpu.api)
+    // Bubble Zoom: LiteRT (successor of TensorFlow Lite; 2.16.1 mis-computes the RT-DETR detector)
+    implementation(libs.litert)
+    implementation(libs.litert.gpu)
+    implementation(libs.litert.gpu.api)
     implementation(libs.haze)
     implementation(compose.colorpicker)
     implementation(projects.flagkit)

@@ -28,7 +28,7 @@ import kotlin.math.roundToInt
 /**
  * Debug-only offline eval harness for Bubble Zoom: runs the shipped detection + cutout pipeline over
  * every image in `<external files>/bzeval/pages` exactly as the reader does (pager decode, webtoon
- * tiling for tall pages) and writes per page `out/<name>.json` (bubbles, lobes, cutout crop rects)
+ * tiling for tall pages) and writes per page `out/<name>.json` (bubbles, text blocks, cutout crop rects)
  * plus `out/<name>__<i>.png` (each cutout's alpha as a grey mask). Scored by the playground eval.
  *
  * `adb shell am start -n app.komikku.dev/eu.kanade.tachiyomi.ui.reader.bubble.BubbleEvalActivity`
@@ -93,7 +93,7 @@ class BubbleEvalActivity : Activity() {
                 .put("rect", rectJson(b.rect.left, b.rect.top, b.rect.right, b.rect.bottom))
                 .put("conf", b.confidence.toDouble())
                 .put("ms", ms)
-            b.lobes?.let { l -> o.put("lobes", JSONArray(l.map { rectJson(it.left, it.top, it.right, it.bottom) })) }
+            if (b.text.isNotEmpty()) o.put("text", JSONArray(b.text.map { rectJson(it.left, it.top, it.right, it.bottom) }))
             if (cut != null) {
                 val bmp = cut.bitmap
                 val px = IntArray(bmp.width * bmp.height)
@@ -106,8 +106,8 @@ class BubbleEvalActivity : Activity() {
                 FileOutputStream(File(out, "${name}__$bi.png")).use { m.compress(Bitmap.CompressFormat.PNG, 100, it) }
                 m.recycle()
                 o.put("cut", JSONArray(listOf(bmp.width, bmp.height)))
-                    .put("outline", cut.outline != null)
-                    .put("outlineFraction", cut.outlineFraction.toDouble())
+                cut.source?.let { r -> o.put("source", JSONArray(listOf(r.left, r.top, r.right, r.bottom))) }
+                cut.recycle()
             }
             arr.put(o)
         }

@@ -568,10 +568,6 @@ object SettingsReaderScreen : SearchableSettings {
         val inPlaceGesturePref = readerPreferences.bubbleZoomInPlaceGesture()
         val floatingGesturePref = readerPreferences.bubbleZoomFloatingGesture()
         val croppingMethodPref = readerPreferences.bubbleZoomCroppingMethod()
-        val outlinePref = readerPreferences.bubbleZoomOutline()
-        val isOutlineEnabled by outlinePref.collectAsState()
-        val outlineWidthPref = readerPreferences.bubbleZoomOutlineWidth()
-        val outlineWidth by outlineWidthPref.collectAsState()
         val floatingBackdropPref = readerPreferences.bubbleZoomFloatingBackdrop()
         val confidencePref = readerPreferences.bubbleZoomConfidence()
         val confidence by confidencePref.collectAsState()
@@ -614,20 +610,6 @@ object SettingsReaderScreen : SearchableSettings {
                     title = stringResource(KMR.strings.pref_bubble_zoom_cropping_method),
                     entries = croppingEntries,
                     enabled = bubbleZoomSupported && isBubbleZoomEnabled,
-                ),
-                Preference.PreferenceItem.SwitchPreference(
-                    preference = outlinePref,
-                    title = stringResource(KMR.strings.pref_bubble_zoom_outline),
-                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_outline_summary),
-                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
-                ),
-                Preference.PreferenceItem.SliderPreference(
-                    value = outlineWidth,
-                    valueRange = ReaderPreferences.BUBBLE_ZOOM_OUTLINE_WIDTH_MIN..ReaderPreferences.BUBBLE_ZOOM_OUTLINE_WIDTH_MAX,
-                    title = stringResource(KMR.strings.pref_bubble_zoom_outline_width),
-                    valueString = "$outlineWidth%",
-                    enabled = bubbleZoomSupported && isBubbleZoomEnabled && isOutlineEnabled,
-                    onValueChanged = { outlineWidthPref.set(it) },
                 ),
                 Preference.PreferenceItem.SwitchPreference(
                     preference = floatingBackdropPref,

@@ -129,6 +129,43 @@ Lettura:
 
 ---
 
+### 3.4 V1-V3 in Kotlin — misurato sull'emulatore (17 ott)
+
+Stesso set e stesso `eval.py`; build debug eseguita da `BubbleEvalActivity` (codice dell'app, non prototipo).
+
+| Metodo | ok | mancate | unione | unione non adiacente | IoU | BF | BF≥0,85 | estranei | persi |
+|---|---|---|---|---|---|---|---|---|---|
+| v1 (app, baseline §3.3) | 62,1 % | 1,2 % | 36,0 % | 19,8 % | 0,68 | 0,59 | 27 % | 23,2 % | 3,9 % |
+| **v2 app** (v4-s TFLite + SAM sul crop + levigatura) | **95,8 %** | 1,2 % | 1,6 % | **0 %** | **0,90** | **0,86** | 68 % | **0,6 %** | 3,2 % |
+| prototipo B Python (riferimento) | 94,8 % | 1,2 % | 1,6 % | 0 % | 0,90 | 0,86 | 69 % | 0,7 % | 3,7 % |
+
+- Il port Kotlin riproduce il prototipo (maschere IoU mediana 0,98 con quelle Python).
+- **Trovato e corretto**: con `org.tensorflow:tensorflow-lite:2.16.1` il detector RT-DETR dava box sbagliati
+  (IoU 0,87 vs ONNX: 93,9 % ok, BF 0,78); con **LiteRT 1.4.2** (`com.google.ai.edge.litert`, successore di TFLite,
+  stessa API Java) IoU 0,993. Dipendenze migrate a LiteRT.
+- Provati e **scartati** (nessun guadagno o peggioramento): divisione geodetica della maschera tra i testi
+  (rovina didascalie e nuvolette con testo vicino), ritaglio con i box delle vicine (cambia 6 maschere su 418).
+- Residui: One Piece BF 0,72 (bordi a tratteggio manga), Omniscient chat/UI (GT `mask_bad`), code e scallop tagliati (persi 3,2 %).
+- Latenze emulatore x86 **CPU** (nessuna GPU utile): detection 520 ms/pagina, ritaglio 450 ms mediana (un encode EdgeSAM per nuvoletta).
+
+### 3.5 Accelerazione hardware (Fold8, findings di agosto + ora)
+
+Dai test di agosto sul Fold8 (Snapdragon, Adreno):
+- **EdgeSAM encoder su GPU delegate ~150-180 ms** (vs ~800 ms CPU, ~2 s MobileSAM), ma solo **forzando** il delegate:
+  `CompatibilityList` dà un falso negativo sugli Adreno recenti. Decoder su CPU (la GPU rifiuta un `CONCAT` 3D), costo trascurabile.
+- **NNAPI scartato**: rifiutava/partizionava i grafi ed era più lento di XNNPACK (ed è deprecato da Android 15).
+
+Conseguenze per la v2:
+- SAM ora gira **una volta per nuvoletta** sul crop (non una per pagina): sul Fold8 ≈ 150-180 ms a nuvoletta su GPU.
+  Quindi il **prewarm in background** delle maschere di tutta la pagina parte **solo se l'encoder è su GPU**
+  (`SamRefiner.isFast`); su CPU il ritaglio si calcola al tocco (~0,5-0,8 s).
+- **Detector v4-s**: il delegate GPU viene tentato (forzato come SAM). L'analizzatore TFLite indica che backbone
+  ed encoder (conv, la gran parte del calcolo) sono compatibili, la testa DETR (GATHER_ND, TOPK, cast int64) resta su CPU →
+  esecuzione partizionata. Sull'emulatore il delegate viene rifiutato (`ADD` v4) → CPU. **Da misurare sul Fold8**
+  (log `TfliteBubbleDetector: ready (backend=…)` e `inference N ms`).
+- **NPU (Hexagon)**: non raggiungibile con l'API Interpreter/NNAPI; la via moderna è LiteRT 2.x `CompiledModel` con
+  acceleratore NPU Qualcomm (compilazione AOT/JIT del modello). Candidato per una fase successiva se la GPU non basta.
+
 ## 4. Panorama modelli (aggiornato ott 2026)
 
 | Modello | Tipo | Stili | Licenza | Note per noi |
@@ -190,18 +227,46 @@ Mitigazione del rischio "rendering": con il **contesto attenuato** un errore di 
 | Fase | Contenuto | Dove | Gate |
 |---|---|---|---|
 | **V0** ✅ 17 ott | Set di test: 56 pagine / 430 nuvolette con GT (SAM 2.1-L + revisione) + `eval.py` (Q1-Q3, Q5) + harness Kotlin `BubbleEvalActivity` (debug) | playground Python | fatto, §3.3 (Q4 coda e Q6 ordine: annotazioni ancora da fare, in V2/V4) |
-| **V1** | Detector v2 (v4-s) → TFLite (onnx2tf; in alternativa ONNX Runtime Mobile) + associazione testo; rimozione `mergeLinked` | Antigravity (conversione) + Claude | Q1, Q2 ≥ v1 |
-| **V2** | Segmentazione v2 (§5) raffinata **prima in Python** fino alle soglie, poi port Kotlin; EdgeSAM spostato sul crop | Claude | Q3-Q5 |
-| **V3** | Rendering: niente outline sintetico, AA nativo, fallback F5, opzione contesto attenuato | Claude | verifica visiva + N1 |
+| **V1** ✅ 17 ott | Detector v2 (v4-s) → TFLite (§8) + associazione testo; rimozione `mergeLinked` | Claude | Q1, Q2 ≥ v1 (§3.4) |
+| **V2** ✅ base 17 ott | Segmentazione: **B portato in Kotlin** (§8, §3.4); restano bordo manga e code | Claude | Q3-Q5 |
+| **V3** ✅ 17 ott | Rendering: niente outline sintetico, AA nativo, fallback F5, contesto attenuato | Claude | verifica visiva + N1 |
 | **V4** | Pannelli + ordine di lettura per vignetta | Claude | Q6 |
 | **V5** (opz.) | Modello di segmentazione dedicato (RF-DETR-Seg) | 4090 | batte V2 sul set |
 
 ---
 
-## 7. Decisioni aperte (utente)
+## 7. Decisioni (utente, 17 ott)
 
-1. **Nuvolette collegate** (F2): separate in sequenza (proposta), gruppo unico, o lobo + contesto?
-2. **Rendering:** cutout puro come oggi, oppure ritaglio con contesto attenuato (più robusto)?
-3. **SAM 3 offline** per le pseudo-etichette: serve rinnovare il token HF (`hf auth login`) e accettare la licenza su `facebook/sam3`.
-4. **Fase V5** (addestrare un modello nostro): sì / più avanti / no.
-5. Le modifiche non committate (`CROP_MARGIN` 0.10, `BOUND_GROW` 0.4) vanno **scartate**: la v2 rimuove quei meccanismi.
+1. **Nuvolette collegate** (F2): **separate in sequenza** — ogni nuvoletta è un target, la navigazione le scorre in ordine.
+2. **Rendering:** **ritaglio pulito + contesto attenuato** — la nuvoletta a piena luminosità, il resto del crop scurito dietro; niente contorno sintetico.
+3. **SAM 3 offline**: non necessario per ora (GT fatto con SAM 2.1-L).
+4. **Fase V5**: **più avanti**.
+5. Modifiche non committate a `CROP_MARGIN` / `BOUND_GROW`: messe in `git stash` (non cancellate); superate dalla v2.
+
+---
+
+## 8. Note di implementazione V1-V3 (17 ott)
+
+**Detector** (`TfliteBubbleDetector`, asset `bubble_detector_v4s.tflite`, 23,7 MB, sostituisce YOLOv8m 26,5 MB):
+1. upstream fornisce solo `detector-v4-s_int8.onnx` con quantizzazione *dinamica* (`ConvInteger`/`MatMulInteger`,
+   non convertibili): `convert/dequant.py` ricostruisce il grafo fp32 de-quantizzando i pesi
+   (parità con l'int8: 922 vs 926 box, IoU medio 0,99);
+2. `fix_inputs.py`: batch 1, `orig_target_sizes` costante [1,1] → box normalizzati 0..1; onnxsim;
+3. `strip_floordiv.py`: rimossa la correzione di segno della floor-division (`Sign`, senza builtin TFLite) — gli indici TopK sono ≥ 0;
+4. onnx2tf → SavedModel (`-rtpo Erf`: `Erf` della GELU sostituito con approssimazione builtin); TFLite fp32 identico all'ONNX (922/922, IoU 1,000);
+5. conversione finale con **TF 2.16** (`reconvert.py`, op version compatibili) e runtime dell'app migrato a **LiteRT 1.4.2**
+   (con `tensorflow-lite` 2.16.1 i box erano sbagliati, §3.4). Pesi int8 dynamic-range. fp16 scartato (degrada le etichette).
+- Input: pagina **stirata** a 640×640 (non letterbox, come in training), RGB 0..1 NHWC. Nessuna NMS (DETR), solo
+  dedup stessa classe IoU > 0,7. Ogni blocco di testo è assegnato a una sola nuvoletta (`textOwners`).
+- Preferenza confidenza: nuova chiave `bubble_zoom_confidence_detr`, default 40 % (i valori tarati per YOLO non valgono).
+- Rimossi: `mergeLinked`/`groupLinked`/`corridorIsFill`, `Bubble.lobes`, `BubblePostprocess` (letterbox/decode YOLO), relativi test.
+
+**Segmentazione** (`SamRefiner.cropMask`, `BubbleExtractor`, `BubbleMask`): metodo **B** di §3.3 —
+crop = box + 35 % per lato a risoluzione nativa (max 1600 px), EdgeSAM sul crop con prompt box, logit
+bilineari alla risoluzione del crop, buchi riempiti, solo il blob più grande, bordo AA 1 px; maschera
+implausibile (< 2 % o > 98 % del crop) → rettangolo arrotondato (F5). Maschere in cache per nuvoletta;
+il prewarm per pagina le calcola in background **solo se l'encoder è su GPU** (su CPU costerebbe secondi per pagina).
+Rimossi: `BubbleFloodExtractor`, `snapToEdges`, `bridgeZones`, `clipToLobeRegion`, contorno sintetico + tracciamento, prewarm a livello pagina.
+
+**Rendering** (`BubbleZoomOverlayView`): il crop opaco (`BubbleCutout.context`) viene disegnato scurito dietro la nuvoletta
+ritagliata; inquadratura sul corpo della nuvoletta (i suoi blocchi di testo). Rimosse le preferenze contorno/spessore.

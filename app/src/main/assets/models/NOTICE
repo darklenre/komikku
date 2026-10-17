@@ -5,19 +5,25 @@ This directory bundles the on-device models used by the reader's "Bubble Zoom"
 feature. All are redistributed under the Apache License 2.0 (see LICENSE).
 
 --------------------------------------------------------------------------------
-1. Speech-bubble detection
+1. Speech-bubble and text detection
 --------------------------------------------------------------------------------
-  Name:     comic-speech-bubble-detector-yolov8m
+  Name:     comic-text-and-bubble-detector ("detector-v4-s")
   Author:   ogkalu
-  Upstream: https://huggingface.co/ogkalu/comic-speech-bubble-detector-yolov8m
-  Commit:   21d5af0a9c69bb522b9968d6cc915f898d71a264
+  Upstream: https://huggingface.co/ogkalu/comic-text-and-bubble-detector
+  Commit:   16e8a622f91fabc6b5b65c96d32d1183f8843546
   Licence:  Apache License 2.0
 
+  RT-DETR-v2 detector (classes: bubble, text_bubble, text_free) trained on
+  manga, webtoon, manhua and western comic pages.
+
   Bundled artifact:
-    bubble_detector_ogkalu.tflite
-      int8 TensorFlow Lite / LiteRT export, produced with Ultralytics
-      YOLO(...).export(format="tflite", imgsz=640, int8=True, nms=False)
-      on a mixed manga/comic calibration set.
+    bubble_detector_v4s.tflite
+      Converted from upstream detector-v4-s_int8.onnx: weights de-quantized to
+      fp32, batch fixed to 1, output boxes normalised (orig_target_sizes folded
+      to 1), a no-op floor-division sign fix-up in the post-processing removed,
+      converted to a SavedModel with onnx2tf (Erf replaced by a builtin
+      approximation), then to TFLite with the TensorFlow 2.16 converter (op
+      versions matching the bundled runtime) and dynamic-range int8 weights.
 
 --------------------------------------------------------------------------------
 2. Cutout refinement (SAM)
@@ -35,5 +41,6 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
 
 All bundled artifacts are derivative works of their respective source models,
 redistributed under the same licence as their source. No changes were made to
-model architecture or trained weights beyond quantization / format conversion
-for on-device inference.
+trained weights beyond quantization / format conversion for on-device
+inference, and none to the model architecture beyond the conversion steps
+listed above.

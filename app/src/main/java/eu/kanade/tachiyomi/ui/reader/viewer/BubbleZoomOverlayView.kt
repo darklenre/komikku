@@ -4,9 +4,9 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Matrix
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
 import android.graphics.RectF
 import android.os.SystemClock
 import android.util.AttributeSet
@@ -101,16 +101,10 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         color = Color.argb(BACKDROP_ALPHA, 0, 0, 0) // Dimmed 82% black backdrop
     }
 
-    /** Sticker outline, stroked live from [BubbleCutout.outline] so the edge stays crisp at any scale. */
-    private val outlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.BLACK
-        style = Paint.Style.STROKE
-        strokeJoin = Paint.Join.ROUND
-        strokeCap = Paint.Cap.ROUND
+    /** The cutout's surrounding crop ([BubbleCutout.context]), drawn darkened behind the balloon. */
+    private val contextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+        colorFilter = PorterDuffColorFilter(Color.argb(CONTEXT_DIM, 0, 0, 0), PorterDuff.Mode.SRC_ATOP)
     }
-    private val outlineMatrix = Matrix()
-    private val outlinePath = Path()
-    private val unitRect = RectF(0f, 0f, 1f, 1f)
 
     // FLOATING pinch-zoom / pan of the current cutout. userScale == 1 && no translation == "fit".
     private var userScale = 1f
@@ -291,7 +285,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         currentPage = null
         rawBubbles = emptyList()
         bubbleRects = emptyList()
-        extractedCutouts.values.forEach { it?.bitmap?.recycle() }
+        extractedCutouts.values.forEach { it?.recycle() }
         extractedCutouts.clear()
         onEdgeListener = null
         onExitListener = null
@@ -387,7 +381,7 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
                 if (isActive && !extractedCutouts.containsKey(idx)) {
                     extractedCutouts[idx] = cutout
                 } else {
-                    cutout?.bitmap?.recycle()
+                    cutout?.recycle()
                 }
             }
         }
@@ -433,16 +427,11 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         a.bottom + (b.bottom - a.bottom) * f,
     )
 
-    /** Strokes the live vector outline (if any) then the shaped bitmap into [rect] at [alpha] (0..255). */
+    /** Draws the dimmed context (if any) then the balloon itself into [rect] at [alpha] (0..255). */
     private fun drawCutout(canvas: Canvas, cutout: BubbleCutout, rect: RectF, alpha: Int) {
-        val path = cutout.outline
-        if (path != null && cutout.outlineFraction > 0f) {
-            outlineMatrix.setRectToRect(unitRect, rect, Matrix.ScaleToFit.FILL)
-            path.transform(outlineMatrix, outlinePath)
-            outlinePaint.alpha = alpha
-            outlinePaint.strokeWidth = cutout.outlineFraction * minOf(rect.width(), rect.height()) * 2f
-            canvas.drawPath(outlinePath, outlinePaint)
-            outlinePaint.alpha = 255
+        cutout.context?.let { ctx ->
+            contextPaint.alpha = alpha
+            canvas.drawBitmap(ctx, null, rect, contextPaint)
         }
         bitmapPaint.alpha = alpha
         canvas.drawBitmap(cutout.bitmap, null, rect, bitmapPaint)
@@ -537,6 +526,9 @@ class BubbleZoomOverlayView @JvmOverloads constructor(
         const val ENTER_ANIM_MS = 200L
         const val EXIT_ANIM_MS = 160L
         const val BACKDROP_ALPHA = 210
+
+        /** How dark the cutout's surrounding context is drawn (alpha of the black wash over it). */
+        const val CONTEXT_DIM = 175
         const val MAX_USER_SCALE = 5f
     }
 }

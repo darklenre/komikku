@@ -36,9 +36,6 @@
     <string name="pref_bubble_zoom_cropping_method">Cutout shape</string>
     <string name="bubble_zoom_cropping_none">Rounded rectangle</string>
     <string name="bubble_zoom_cropping_sam">Precise (SAM refinement)</string>
-    <string name="pref_bubble_zoom_outline">Bubble outline</string>
-    <string name="pref_bubble_zoom_outline_summary">Draw a dark edge around the cut-out bubble</string>
-    <string name="pref_bubble_zoom_outline_width">Outline thickness</string>
     <string name="pref_bubble_zoom_floating_backdrop">Dim the page behind the cutout</string>
     <string name="pref_bubble_zoom_floating_backdrop_summary">Darken the rest of the page while a floating bubble cutout is shown. Turn off to keep the page visible around it.</string>
     <string name="bubble_zoom_gesture_long_tap">Long tap</string>

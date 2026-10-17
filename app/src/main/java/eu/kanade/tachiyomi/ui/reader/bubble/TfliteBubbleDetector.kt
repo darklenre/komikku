@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.RectF
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
@@ -11,18 +12,24 @@ import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.util.concurrent.Executors
-import kotlin.math.max
 
 /**
  * [BubbleDetector] backed by TensorFlow Lite / LiteRT and the bundled model
- * `models/bubble_detector_ogkalu.tflite` (`ogkalu/comic-speech-bubble-detector-yolov8m`, Apache-2.0):
- * YOLOv8-detect, 640 input, int8. Output `[1, 4+nc, anchors]` (or transposed).
+ * `models/bubble_detector_v4s.tflite` (`ogkalu/comic-text-and-bubble-detector` "detector-v4-s",
+ * RT-DETR-v2, Apache-2.0; conversion steps in `assets/models/NOTICE`).
  *
- * The input layout (`[1,3,S,S]` vs `[1,S,S,3]`), input size, feature count and transpose are all
- * auto-detected at init. Inference runs on a single background thread with GPU acceleration if
- * supported, falling back to XNNPACK CPU.
+ * Input `[1, 640, 640, 3]` f32 RGB 0..1, the page *stretched* to 640x640 (the model was trained on
+ * resized, not letterboxed, pages). Outputs, sorted by tensor name: labels `[1,300]` int64
+ * (0 bubble, 1 text inside a bubble, 2 free text), boxes `[1,300,4]` x0,y0,x1,y1 normalised 0..1,
+ * scores `[1,300]`. DETR emits one box per object, so no NMS is needed beyond dropping the odd
+ * same-class duplicate.
+ *
+ * Runs on a single background thread. The GPU delegate is tried first (forced past CompatibilityList,
+ * whose denylist misreports current Adreno parts — same as [SamRefiner]): it takes the convolutional
+ * backbone, the bulk of the compute, while the DETR head's gathers / TopK / int64 casts stay on CPU.
+ * If the delegate can't be created the whole graph runs on XNNPACK. The backend and per-page latency
+ * are logged so real devices can be checked.
  */
 class TfliteBubbleDetector(context: Context) : BubbleDetector {
 
@@ -33,18 +40,18 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     private var interpreter: Interpreter? = null
     private var gpuDelegate: GpuDelegate? = null
     private var modelBuffer: java.nio.MappedByteBuffer? = null
+    private var backend = "cpu"
 
-    private var inputSize = INPUT
-    private lateinit var pixelBuffer: IntArray
-    private lateinit var chwBuffer: FloatArray
-    private lateinit var inputBuffer: FloatBuffer
-    private lateinit var inputByteBuffer: ByteBuffer
+    private val pixels = IntArray(INPUT * INPUT)
+    private val input: ByteBuffer = ByteBuffer.allocateDirect(INPUT * INPUT * 3 * 4).order(ByteOrder.nativeOrder())
+    private val labels = Array(1) { LongArray(QUERIES) }
+    private val boxes = Array(1) { Array(QUERIES) { FloatArray(4) } }
+    private val scores = Array(1) { FloatArray(QUERIES) }
 
-    private var isInputNhwc = false
-    private var numFeatures = 5
-    private var numAnchors = 8400
-    private var isOutputTransposed = false
-    private var outputArray3D: Array<Array<FloatArray>>? = null
+    /** Output index of labels / boxes / scores (in that order when sorted by tensor name). */
+    private var outLabels = 0
+    private var outBoxes = 1
+    private var outScores = 2
 
     init {
         try {
@@ -52,70 +59,56 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
             // so it can be mmap'd straight from the APK — no copy into filesDir, no full read into heap.
             val buffer = mmapVerifiedModel(context, ASSET, ASSET_SHA)
             modelBuffer = buffer
-            val compatList = CompatibilityList()
-            var createdWithGpu = false
-
-            if (compatList.isDelegateSupportedOnThisDevice) {
-                try {
-                    val delegate = GpuDelegate(compatList.bestOptionsForThisDevice)
-                    interpreter = Interpreter(buffer, Interpreter.Options().apply { addDelegate(delegate) })
-                    gpuDelegate = delegate
-                    createdWithGpu = true
-                } catch (t: Throwable) {
-                    logcat(LogPriority.WARN) { "TfliteBubbleDetector: GPU delegate init failed, falling back to CPU: ${t.message}" }
-                    gpuDelegate?.close()
-                    gpuDelegate = null
-                }
-            }
-
-            if (!createdWithGpu) {
+            val interp = gpuInterpreter(buffer) ?: run {
                 buffer.rewind()
-                interpreter = Interpreter(
+                backend = "cpu"
+                Interpreter(
                     buffer,
                     Interpreter.Options().apply {
                         setUseXNNPACK(true)
-                        setNumThreads(2)
+                        setNumThreads(THREADS)
                     },
                 )
             }
-
-            interpreter?.let { interp ->
-                val inShape = interp.getInputTensor(0).shape()
-                isInputNhwc = inShape.size == 4 && inShape[3] == 3
-                inputSize = (if (isInputNhwc) inShape.getOrNull(1) else inShape.getOrNull(2))
-                    ?.takeIf { it > 0 } ?: INPUT
-                allocInput()
-
-                val s = interp.getOutputTensor(0).shape()
-                if (s.size == 3 && s[1] > s[2]) {
-                    // [1, anchors, features]
-                    isOutputTransposed = true
-                    numAnchors = s[1]
-                    numFeatures = s[2]
-                    outputArray3D = Array(1) { Array(numAnchors) { FloatArray(numFeatures) } }
-                } else {
-                    // [1, features, anchors]
-                    isOutputTransposed = false
-                    numFeatures = s[1]
-                    numAnchors = s[2]
-                    outputArray3D = Array(1) { Array(numFeatures) { FloatArray(numAnchors) } }
-                }
+            val byName = (0 until interp.outputTensorCount).sortedBy { interp.getOutputTensor(it).name() }
+            outLabels = byName[0]
+            outBoxes = byName[1]
+            outScores = byName[2]
+            check(interp.getOutputTensor(outBoxes).shape().contentEquals(intArrayOf(1, QUERIES, 4))) {
+                "unexpected boxes shape ${interp.getOutputTensor(outBoxes).shape().contentToString()}"
             }
+            interpreter = interp
+            logcat(LogPriority.WARN) { "TfliteBubbleDetector: ready (backend=$backend)" }
         } catch (t: Throwable) {
             logcat(LogPriority.ERROR) { "TfliteBubbleDetector: session init failed: ${t.message}" }
         }
     }
 
-    private fun allocInput() {
-        pixelBuffer = IntArray(inputSize * inputSize)
-        chwBuffer = FloatArray(3 * inputSize * inputSize)
-        inputByteBuffer = ByteBuffer.allocateDirect(3 * inputSize * inputSize * 4).apply {
-            order(ByteOrder.nativeOrder())
+    /** GPU delegate interpreter (threads still used by the CPU-side partitions), or null if it can't be created. */
+    private fun gpuInterpreter(buffer: java.nio.MappedByteBuffer): Interpreter? {
+        val compat = CompatibilityList()
+        val supported = compat.isDelegateSupportedOnThisDevice
+        var delegate: GpuDelegate? = null
+        return try {
+            delegate = GpuDelegate(if (supported) compat.bestOptionsForThisDevice else GpuDelegate.Options())
+            val interp = Interpreter(
+                buffer,
+                Interpreter.Options().apply {
+                    addDelegate(delegate)
+                    setNumThreads(THREADS)
+                },
+            )
+            gpuDelegate = delegate
+            backend = if (supported) "gpu" else "gpu(forced)"
+            interp
+        } catch (t: Throwable) {
+            logcat(LogPriority.WARN) { "TfliteBubbleDetector: GPU delegate unavailable (compatList=$supported): ${t.message}" }
+            runCatching { delegate?.close() }
+            null
         }
-        inputBuffer = inputByteBuffer.asFloatBuffer()
     }
 
-    override val isAvailable: Boolean get() = interpreter != null && ::inputBuffer.isInitialized
+    override val isAvailable: Boolean get() = interpreter != null
 
     override suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble> {
         val interp = interpreter ?: return emptyList()
@@ -129,7 +122,9 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     fun close() {
         try {
             interpreter?.close()
+            interpreter = null
             gpuDelegate?.close()
+            gpuDelegate = null
             modelBuffer = null
             dispatcher.close()
         } catch (t: Throwable) {
@@ -138,81 +133,115 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     }
 
     private fun infer(interp: Interpreter, bitmap: Bitmap, confThreshold: Float): List<Bubble> {
-        val lb = letterboxOf(bitmap.width, bitmap.height, inputSize)
-
-        val scaled = Bitmap.createScaledBitmap(bitmap, lb.nw, lb.nh, true)
-        val pixels = pixelBuffer
-        scaled.getPixels(pixels, 0, lb.nw, 0, 0, lb.nw, lb.nh)
+        val scaled = Bitmap.createScaledBitmap(bitmap, INPUT, INPUT, true)
+        scaled.getPixels(pixels, 0, INPUT, 0, 0, INPUT, INPUT)
         if (scaled != bitmap) scaled.recycle()
-
-        inputBuffer.rewind()
-        val temp = chwBuffer
-        val grey = 114f / 255f
-        java.util.Arrays.fill(temp, grey)
-        if (isInputNhwc) {
-            for (y in 0 until lb.nh) {
-                val row = (y + lb.padY) * inputSize
-                val src = y * lb.nw
-                for (x in 0 until lb.nw) {
-                    val p = pixels[src + x]
-                    val idx = (row + lb.padX + x) * 3
-                    temp[idx] = ((p shr 16) and 0xFF) / 255f
-                    temp[idx + 1] = ((p shr 8) and 0xFF) / 255f
-                    temp[idx + 2] = (p and 0xFF) / 255f
-                }
-            }
-        } else {
-            val plane = inputSize * inputSize
-            for (y in 0 until lb.nh) {
-                val row = (y + lb.padY) * inputSize
-                val src = y * lb.nw
-                for (x in 0 until lb.nw) {
-                    val p = pixels[src + x]
-                    val idx = row + lb.padX + x
-                    temp[idx] = ((p shr 16) and 0xFF) / 255f
-                    temp[idx + plane] = ((p shr 8) and 0xFF) / 255f
-                    temp[idx + 2 * plane] = (p and 0xFF) / 255f
-                }
-            }
+        input.rewind()
+        val f = input.asFloatBuffer()
+        for (p in pixels) {
+            f.put(((p shr 16) and 0xFF) / 255f)
+            f.put(((p shr 8) and 0xFF) / 255f)
+            f.put((p and 0xFF) / 255f)
         }
-        inputBuffer.put(temp)
-        inputBuffer.rewind()
+        input.rewind()
 
-        val out3D = outputArray3D ?: return emptyList()
-        interp.run(inputByteBuffer, out3D)
+        val outputs = hashMapOf<Int, Any>(outLabels to labels, outBoxes to boxes, outScores to scores)
+        val t0 = System.nanoTime()
+        interp.runForMultipleInputsOutputs(arrayOf(input), outputs)
+        logcat(LogPriority.DEBUG) { "TfliteBubbleDetector: inference ${(System.nanoTime() - t0) / 1_000_000}ms ($backend)" }
 
-        val featureMajor: Array<FloatArray> = if (isOutputTransposed) {
-            val out = out3D[0] // [anchors][features]
-            Array(numFeatures) { f -> FloatArray(numAnchors) { a -> out[a][f] } }
-        } else {
-            out3D[0] // [features][anchors]
-        }
-
-        var maxCoord = 0f
-        for (a in 0 until numAnchors) {
-            maxCoord = max(
-                maxCoord,
-                max(featureMajor[0][a], max(featureMajor[1][a], max(featureMajor[2][a], featureMajor[3][a]))),
+        val balloons = ArrayList<FloatArray>()
+        val texts = ArrayList<FloatArray>()
+        for (q in 0 until QUERIES) {
+            val s = scores[0][q]
+            if (s < confThreshold) continue
+            val b = boxes[0][q]
+            val box = floatArrayOf(
+                b[0].coerceIn(0f, 1f),
+                b[1].coerceIn(0f, 1f),
+                b[2].coerceIn(0f, 1f),
+                b[3].coerceIn(0f, 1f),
+                s,
             )
+            if (box[2] <= box[0] || box[3] <= box[1]) continue
+            when (labels[0][q].toInt()) {
+                LABEL_BUBBLE -> balloons += box
+                LABEL_TEXT_IN_BUBBLE -> texts += box
+            }
         }
-        val coordsIn640Space = maxCoord > 1.5f
-
-        return decodeDetections(
-            featureMajor = featureMajor,
-            lb = lb,
-            coordsIn640Space = coordsIn640Space,
-            confThreshold = confThreshold,
-            iouThreshold = IOU_THRESHOLD,
-        )
+        return assembleBubbles(dedupe(balloons), dedupe(texts))
     }
 
     private companion object {
-        const val ASSET = "models/bubble_detector_ogkalu.tflite"
+        const val ASSET = "models/bubble_detector_v4s.tflite"
 
         /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
-        const val ASSET_SHA = "98e3938c48ff0986429fad638aefa3a1f3ac6b506863ded78d10e6d10d2be282"
+        const val ASSET_SHA = "43264efa950091fc0d9d1451c8ccfad0a245ee98a9fd7023007e8a8d90c30cdf"
 
         const val INPUT = 640
-        const val IOU_THRESHOLD = 0.45f
+        const val QUERIES = 300
+        const val THREADS = 4
+        const val LABEL_BUBBLE = 0
+        const val LABEL_TEXT_IN_BUBBLE = 1
     }
+}
+
+/** Same-class boxes overlapping more than this IoU are one object reported twice. */
+private const val DUPLICATE_IOU = 0.7f
+
+/** A text block belongs to a balloon when at least this share of it lies inside the balloon box. */
+private const val TEXT_INSIDE_FRAC = 0.5f
+
+/** Greedy by score: drops a box that overlaps an already kept one by more than [DUPLICATE_IOU]. Each box is `[l,t,r,b,score]`. */
+internal fun dedupe(boxes: List<FloatArray>): List<FloatArray> {
+    val kept = ArrayList<FloatArray>(boxes.size)
+    for (b in boxes.sortedByDescending { it[4] }) {
+        if (kept.none { iou(it, b) > DUPLICATE_IOU }) kept += b
+    }
+    return kept
+}
+
+/** Builds the [Bubble]s from balloon and text-block boxes (`[l,t,r,b,score]`, 0..1); see [textOwners]. */
+internal fun assembleBubbles(balloons: List<FloatArray>, texts: List<FloatArray>): List<Bubble> {
+    val owner = textOwners(balloons, texts)
+    return balloons.mapIndexed { i, b ->
+        val own = texts.filterIndexed { t, _ -> owner[t] == i }.map { RectF(it[0], it[1], it[2], it[3]) }
+        Bubble(RectF(b[0], b[1], b[2], b[3]), b[4], own)
+    }
+}
+
+/**
+ * For each text block, the index of the balloon it belongs to, or -1: the single balloon containing
+ * the largest share of it (at least [TEXT_INSIDE_FRAC]), the smallest balloon on a tie. Overlapping
+ * neighbours therefore never share a text block.
+ */
+internal fun textOwners(balloons: List<FloatArray>, texts: List<FloatArray>): IntArray = IntArray(texts.size) { ti ->
+    val t = texts[ti]
+    val tArea = area(t).coerceAtLeast(1e-9f)
+    var best = -1
+    var bestFrac = 0f
+    var bestArea = 0f
+    for ((i, b) in balloons.withIndex()) {
+        val frac = intersection(t, b) / tArea
+        if (frac < TEXT_INSIDE_FRAC) continue
+        val a = area(b)
+        if (best < 0 || frac > bestFrac + 1e-6f || (frac >= bestFrac - 1e-6f && a < bestArea)) {
+            best = i
+            bestFrac = frac
+            bestArea = a
+        }
+    }
+    best
+}
+
+private fun area(b: FloatArray) = (b[2] - b[0]).coerceAtLeast(0f) * (b[3] - b[1]).coerceAtLeast(0f)
+
+private fun intersection(a: FloatArray, b: FloatArray): Float =
+    (minOf(a[2], b[2]) - maxOf(a[0], b[0])).coerceAtLeast(0f) *
+        (minOf(a[3], b[3]) - maxOf(a[1], b[1])).coerceAtLeast(0f)
+
+private fun iou(a: FloatArray, b: FloatArray): Float {
+    val i = intersection(a, b)
+    val u = area(a) + area(b) - i
+    return if (u <= 0f) 0f else i / u
 }

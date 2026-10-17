@@ -389,7 +389,7 @@ class WebtoonViewer(
     // KMK --> Bubble Zoom
     private var pendingBubbleZoomPoll: Runnable? = null
 
-    // Cached bubbles for [page], linked lobes merged, reading order (vertical); rects 0..1. Null if not ready.
+    // Cached bubbles for [page], one per balloon, reading order (vertical); rects 0..1. Null if not ready.
     private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
         return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL)
