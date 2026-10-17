@@ -126,6 +126,13 @@ class BubbleEvalActivity : Activity() {
         }
         val res = JSONObject().put("size", JSONArray(listOf(w, h))).put("tiled", tiled)
             .put("detMs", detMs).put("bubbles", arr)
+        // reading order as the viewers compute it, as indices into "bubbles"
+        val panels = BubbleDetection.panels(key)
+        for ((tag, dir) in listOf("orderLTR" to ReadingDirection.LTR, "orderRTL" to ReadingDirection.RTL)) {
+            val sorted = BubbleReadingOrder.sort(bubbles, dir, panels)
+            res.put(tag, JSONArray(sorted.map { b -> bubbles.indexOfFirst { it === b } }))
+        }
+        res.put("panels", panels?.leaves(ReadingDirection.LTR)?.size ?: 0)
         File(out, "$name.json").writeText(res.toString(1))
         logcat(LogPriority.WARN) { "BubbleEval $name bubbles=${bubbles.size} det=${detMs}ms" }
     }

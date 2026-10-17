@@ -241,7 +241,7 @@ abstract class PagerViewer(
     /** Cached bubbles for [page], one per balloon, in reading order; rects 0..1. Null if not ready. */
     private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
-        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection)
+        return BubbleReadingOrder.sort(bubbles, bubbleReadingDirection, BubbleDetection.panels(bubbleKeyFor(page)))
     }
 
     /**

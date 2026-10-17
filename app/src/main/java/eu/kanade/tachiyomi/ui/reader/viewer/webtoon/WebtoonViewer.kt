@@ -392,7 +392,7 @@ class WebtoonViewer(
     // Cached bubbles for [page], one per balloon, reading order (vertical); rects 0..1. Null if not ready.
     private fun bubbleDetections(page: ReaderPage): List<Bubble>? {
         val bubbles = BubbleDetection.cached(bubbleKeyFor(page))?.takeIf { it.isNotEmpty() } ?: return null
-        return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL)
+        return BubbleReadingOrder.sort(bubbles, ReadingDirection.VERTICAL, BubbleDetection.panels(bubbleKeyFor(page)))
     }
 
     // If the touch lands inside a detected bubble on [page], enter Bubble Zoom on that page's

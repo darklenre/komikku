@@ -209,6 +209,30 @@ Obiettivo utente: ritaglio pulito con **bordi perfettamente definiti** (contesto
 BF scende di 0,02 per la convenzione del GT (verificato a vista: i casi "peggiorati" hanno il contorno ora completo).
 Residuo visibile: taglio frastagliato dove due nuvolette collegate sono separate da una linea d'inchiostro ("I AM JOÃO!").
 
+**Tagli tra nuvolette collegate (provato, non adottato)** — `scripts/neckcut.py`: sostituire il tratto di bordo che attraversa il
+riempimento con la corda tra i due estremi. Anche con salvaguardie (oltre il taglio deve esserci un'altra nuvoletta rilevata,
+mai tagliare il testo, area modificata ≤ 12 %) il risultato è misto: sistema "I AM JOÃO!" e 2 casi simili, rovina nuvolette dipinte
+senza contorno ("HA.") o cambia l'inclinazione di tagli già dritti. Metriche invariate. Resta un difetto minore aperto.
+
+### 3.8 Ordine di lettura per vignette — V4 (17 ott)
+
+**GT**: ordine di lettura annotato a mano su 40 pagine (`testset/order_gt.json`, direzione LTR/RTL; webtoon esclusi).
+**Misura** (`scripts/eval_order.py`): ogni nuvoletta GT → la nuvoletta dell'app scelta da un tocco sul suo testo;
+*esatte* = pagine con ordine tutto giusto, *coppie* = accordo su tutte le coppie, *successiva* = lo swipe porta alla
+nuvoletta giusta.
+
+| | pagine esatte | coppie | successiva corretta |
+|---|---|---|---|
+| v1 `BubbleReadingOrder` (fasce → colonne) | 35 % | 94,8 % | 69,4 % |
+| **v2 vignette (XY-cut) + v1 dentro la vignetta** (Kotlin, Fold8) | **68 %** | **97,1 %** | **86,9 %** |
+
+**Vignette** (`BubblePanels`): XY-cut ricorsivo sulle canaline — righe/colonne dritte del colore della canalina per tutta
+la regione (≥ 98,5 % dei pixel non coperti da nuvolette: le nuvolette che scavalcano una canalina non la nascondono).
+Colore canalina sconosciuto → candidati (bordo pagina, bianco, nero), vince quello che trova più vignette. Albero
+indipendente dalla direzione: RTL inverte solo le vignette affiancate. Calcolato sulla bitmap di detection (~10 ms).
+Residui: vignette inclinate/irregolari (Absolute, Monstress art nouveau) e ordine dentro la vignetta (scambi di 1-2
+nuvolette spesso ambigui). Varianti dell'ordine interno provate: nessun guadagno oltre il rumore.
+
 ## 4. Panorama modelli (aggiornato ott 2026)
 
 | Modello | Tipo | Stili | Licenza | Note per noi |
@@ -273,7 +297,7 @@ Mitigazione del rischio "rendering": con il **contesto attenuato** un errore di 
 | **V1** ✅ 17 ott | Detector v2 (v4-s) → TFLite (§8) + associazione testo; rimozione `mergeLinked` | Claude | Q1, Q2 ≥ v1 (§3.4) |
 | **V2** ✅ base 17 ott | Segmentazione: **B portato in Kotlin** (§8, §3.4); restano bordo manga e code | Claude | Q3-Q5 |
 | **V3** ✅ 17 ott | Rendering: niente outline sintetico, AA nativo, fallback F5, contesto attenuato | Claude | verifica visiva + N1 |
-| **V4** | Pannelli + ordine di lettura per vignetta | Claude | Q6 |
+| **V4** ✅ 17 ott | Pannelli (XY-cut) + ordine di lettura per vignetta (§3.8) | Claude | Q6: 87 % successiva corretta (soglia 95 % non ancora) |
 | **V5** (opz.) | Modello di segmentazione dedicato (RF-DETR-Seg) | 4090 | batte V2 sul set |
 
 ---

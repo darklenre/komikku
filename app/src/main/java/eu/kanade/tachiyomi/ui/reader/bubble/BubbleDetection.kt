@@ -43,6 +43,9 @@ object BubbleDetection {
 
     private val cache = LruCache<String, List<Bubble>>(CACHE_SIZE)
 
+    /** Panel layout per page key, for panel-aware reading order. Absent on tiled (webtoon) pages. */
+    private val panelCache = LruCache<String, PanelNode>(CACHE_SIZE)
+
     @Volatile
     private var detector: BubbleDetector? = null
 
@@ -62,11 +65,17 @@ object BubbleDetection {
 
     fun cached(key: String): List<Bubble>? = cache.get(key)
 
+    /** Panel layout found for [key] alongside its bubbles, or null (not detected / tiled page). */
+    fun panels(key: String): PanelNode? = panelCache.get(key)
+
     /** True while detection for [key] has been requested but no result (even an empty one) is cached yet. */
     fun isPending(key: String): Boolean = cache.get(key) == null
 
     /** Drops all cached detections so the next page bind re-runs the detector (e.g. after the confidence changed). */
-    fun clearCache() = cache.evictAll()
+    fun clearCache() {
+        cache.evictAll()
+        panelCache.evictAll()
+    }
 
     private const val DEFAULT_CONFIDENCE_PERCENT = 40
 
@@ -106,6 +115,9 @@ object BubbleDetection {
                 .takeIf { it.isAvailable }
                 ?.detect(bitmap, confThreshold)
                 ?: emptyList()
+            if (result.size > 1) {
+                runCatching { panelsOf(bitmap, result) }.getOrNull()?.let { panelCache.put(key, it) }
+            }
             cache.put(key, result)
             return result
         } finally {
@@ -150,6 +162,18 @@ object BubbleDetection {
         } finally {
             _activeDetections.update { it - 1 }
         }
+    }
+
+    private fun panelsOf(bitmap: Bitmap, bubbles: List<Bubble>): PanelNode {
+        val w = bitmap.width
+        val h = bitmap.height
+        val px = IntArray(w * h)
+        bitmap.getPixels(px, 0, w, 0, 0, w, h)
+        val luma = FloatArray(px.size) {
+            val p = px[it]
+            0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)
+        }
+        return BubblePanels.detect(luma, w, h, bubbles.map { floatArrayOf(it.rect.left, it.rect.top, it.rect.right, it.rect.bottom) })
     }
 
     /** Greedy NMS on merged tile detections: keep by confidence, drop anything overlapping a kept box. */
