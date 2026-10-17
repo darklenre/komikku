@@ -66,7 +66,8 @@ object BubbleExtractor {
         } else {
             null
         }
-        return compose(crop, bubble, alpha, withContext)
+        val pageBubbles = BubbleDetection.cached(bubbleKeyFor(page)).orEmpty()
+        return compose(crop, bubble, alpha, withContext, pageBubbles)
     }
 
     /**
@@ -163,13 +164,25 @@ object BubbleExtractor {
      * The balloon cut out of [crop] with [alpha] (or the rounded-rect fallback); with [withContext] the
      * opaque crop is kept too, for the overlay to draw dimmed behind it.
      */
-    private fun compose(crop: Crop, bubble: Bubble, alpha: FloatArray?, withContext: Boolean): BubbleCutout {
+    private fun compose(
+        crop: Crop,
+        bubble: Bubble,
+        alpha: FloatArray?,
+        withContext: Boolean,
+        pageBubbles: List<Bubble> = emptyList(),
+    ): BubbleCutout {
         val src = crop.bitmap
         val w = src.width
         val h = src.height
-        val a = alpha ?: roundedRectAlpha(w, h, crop.box)
-        val px = IntArray(w * h)
+        var a = alpha ?: roundedRectAlpha(w, h, crop.box)
+        var px = IntArray(w * h)
         src.getPixels(px, 0, w, 0, 0, w, h)
+        if (alpha != null) {
+            completeLinked(crop, bubble, alpha, px, pageBubbles)?.let { (mask, pixels) ->
+                a = antialias(mask, w, h)
+                px = pixels
+            }
+        }
         for (i in px.indices) {
             val ai = (a[i] * 255f + 0.5f).toInt().coerceIn(0, 255)
             px[i] = (ai shl 24) or (px[i] and 0x00FFFFFF)
@@ -206,6 +219,52 @@ object BubbleExtractor {
             bodyOffsetX = body.centerX() / w - 0.5f,
             bodyOffsetY = body.centerY() / h - 0.5f,
         )
+    }
+
+    /**
+     * Linked balloon cut from its neighbour: rebuild the missing outline so it reads as a standalone
+     * balloon ([BubbleCompletion]). Returns the completed mask and repainted pixels, or null.
+     */
+    private fun completeLinked(
+        crop: Crop,
+        bubble: Bubble,
+        alpha: FloatArray,
+        px: IntArray,
+        pageBubbles: List<Bubble>,
+    ): Pair<BooleanArray, IntArray>? {
+        val others = pageBubbles.filter { it.rect != bubble.rect }
+        if (others.isEmpty()) return null
+        val w = crop.bitmap.width
+        val h = crop.bitmap.height
+        val box = crop.box
+        val br = bubble.rect
+        // page-normalised rect -> crop px, through the detection box's own transform
+        fun toCrop(r: RectF) = floatArrayOf(
+            box.left + (r.left - br.left) / br.width() * box.width(),
+            box.top + (r.top - br.top) / br.height() * box.height(),
+            box.left + (r.right - br.left) / br.width() * box.width(),
+            box.top + (r.bottom - br.top) / br.height() * box.height(),
+        )
+        val boxes = others.map { toCrop(it.rect) }
+        val text = bubble.text.map { toCrop(it) }
+        var mask = BooleanArray(px.size) { alpha[it] >= 0.5f }
+        var pixels = px
+        var done = false
+        // a balloon in the middle of a chain is linked on two sides: up to two passes, one cut each
+        repeat(2) {
+            val r = runCatching { BubbleCompletion.complete(pixels, luma(pixels), mask, w, h, boxes, text) }
+                .onFailure { logcat(LogPriority.WARN) { "BubbleExtractor: completion failed: ${it.message}" } }
+                .getOrNull() ?: return@repeat
+            mask = r.mask
+            pixels = r.pixels
+            done = true
+        }
+        return if (done) mask to pixels else null
+    }
+
+    private fun luma(px: IntArray) = FloatArray(px.size) {
+        val p = px[it]
+        0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)
     }
 
     /** Alpha of a rounded rectangle around [box] grown by [FALLBACK_GROW], 1 px anti-aliased. */

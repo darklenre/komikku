@@ -209,7 +209,17 @@ Obiettivo utente: ritaglio pulito con **bordi perfettamente definiti** (contesto
 BF scende di 0,02 per la convenzione del GT (verificato a vista: i casi "peggiorati" hanno il contorno ora completo).
 Residuo visibile: taglio frastagliato dove due nuvolette collegate sono separate da una linea d'inchiostro ("I AM JOÃO!").
 
-**Tagli tra nuvolette collegate (provato, non adottato)** — `scripts/neckcut.py`: sostituire il tratto di bordo che attraversa il
+**Completamento della forma delle nuvolette collegate (adottato, 17 ott)** — `BubbleCompletion` (prototipo `scripts/complete.py`).
+Dove la maschera taglia il riempimento condiviso con una nuvoletta vicina (estremi del taglio sull'inchiostro, oltre il taglio
+un'altra nuvoletta rilevata), il tratto mancante del contorno viene ricostruito come curva di Hermite che prosegue le tangenti
+del contorno della nuvoletta ai due estremi; il rigonfiamento è dipinto col colore di riempimento, il nuovo bordo (e le due
+giunzioni) col colore dell'inchiostro dello stesso spessore, con copertura dalla distanza dal bordo → si raccorda al tratto
+originale. Fino a due tagli per nuvoletta (catene). Sicurezze: niente curva verso l'interno, area finale 80-135 % dell'originale.
+Sul set: 84 nuvolette completate su 425 (Kotlin = prototipo), metriche invariate (il GT non contiene la forma ricostruita),
+ritaglio +~15 ms. Verificato a vista: "I AM JOÃO!" diventa un ovale chiuso col suo bordo. Limiti: nuvolette tagliate dal bordo
+del crop o da una cornice (non sono tagli tra nuvolette) restano come sono.
+
+**Tagli tra nuvolette collegate — raddrizzamento (provato, non adottato)** — `scripts/neckcut.py`: sostituire il tratto di bordo che attraversa il
 riempimento con la corda tra i due estremi. Anche con salvaguardie (oltre il taglio deve esserci un'altra nuvoletta rilevata,
 mai tagliare il testo, area modificata ≤ 12 %) il risultato è misto: sistema "I AM JOÃO!" e 2 casi simili, rovina nuvolette dipinte
 senza contorno ("HA.") o cambia l'inclinazione di tagli già dritti. Metriche invariate. Resta un difetto minore aperto.

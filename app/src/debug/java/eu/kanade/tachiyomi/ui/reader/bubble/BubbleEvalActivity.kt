@@ -118,6 +118,7 @@ class BubbleEvalActivity : Activity() {
                 val m = Bitmap.createBitmap(px, bmp.width, bmp.height, Bitmap.Config.ARGB_8888)
                 FileOutputStream(File(out, "${name}__$bi.png")).use { m.compress(Bitmap.CompressFormat.PNG, 100, it) }
                 m.recycle()
+                FileOutputStream(File(out, "${name}__${bi}_rgba.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
                 o.put("cut", JSONArray(listOf(bmp.width, bmp.height)))
                 cut.source?.let { r -> o.put("source", JSONArray(listOf(r.left, r.top, r.right, r.bottom))) }
                 cut.recycle()
