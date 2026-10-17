@@ -158,6 +158,9 @@ class ReaderPreferences(
     fun bubbleZoomCroppingMethod() = preferenceStore.getString("bubble_zoom_cropping_method", "sam")
     fun bubbleZoomFloatingBackdrop() = preferenceStore.getBoolean("bubble_zoom_floating_backdrop", true)
 
+    /** Draw the area around the balloon, dimmed, behind the floating cutout (off = clean balloon only). */
+    fun bubbleZoomCutoutContext() = preferenceStore.getBoolean("bubble_zoom_cutout_context", false)
+
     /**
      * Minimum detector confidence (percent) for a box to count as a bubble; see slider range. New key
      * for the RT-DETR detector: values tuned for the old YOLO one don't carry over.

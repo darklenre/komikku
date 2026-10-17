@@ -55,7 +55,9 @@ object BubbleExtractor {
     /** Extracts [bubble] from [page] as a shaped, full-resolution [BubbleCutout]. */
     fun extractBubble(page: ReaderPage, bubble: Bubble, sourceSize: Size?): BubbleCutout? {
         val streamFn = page.stream ?: return null
-        val method = runCatching { Injekt.get<ReaderPreferences>().bubbleZoomCroppingMethod().get() }.getOrDefault("sam")
+        val prefs = runCatching { Injekt.get<ReaderPreferences>() }.getOrNull()
+        val method = prefs?.bubbleZoomCroppingMethod()?.get() ?: "sam"
+        val withContext = prefs?.bubbleZoomCutoutContext()?.get() ?: false
         val context = runCatching { Injekt.get<Application>() as Context }.getOrNull()
         val bytes = snapshot(streamFn) ?: return null
         val crop = decodeCrop(bytes, bubble.rect, sourceSize) ?: return null
@@ -64,7 +66,7 @@ object BubbleExtractor {
         } else {
             null
         }
-        return compose(crop, bubble, alpha)
+        return compose(crop, bubble, alpha, withContext)
     }
 
     /**
@@ -157,8 +159,11 @@ object BubbleExtractor {
         }
     }.onFailure { logcat(LogPriority.WARN) { "BubbleExtractor: crop decode failed: ${it.message}" } }.getOrNull()
 
-    /** The balloon cut out of [crop] with [alpha] (or the rounded-rect fallback), plus its opaque context. */
-    private fun compose(crop: Crop, bubble: Bubble, alpha: FloatArray?): BubbleCutout {
+    /**
+     * The balloon cut out of [crop] with [alpha] (or the rounded-rect fallback); with [withContext] the
+     * opaque crop is kept too, for the overlay to draw dimmed behind it.
+     */
+    private fun compose(crop: Crop, bubble: Bubble, alpha: FloatArray?, withContext: Boolean): BubbleCutout {
         val src = crop.bitmap
         val w = src.width
         val h = src.height
@@ -187,9 +192,16 @@ object BubbleExtractor {
         } else {
             box
         }
+        // `cut` is built from a pixel copy, so the crop can go unless the overlay draws it as context.
+        val ctx = if (withContext) {
+            src
+        } else {
+            src.recycle()
+            null
+        }
         return BubbleCutout(
             bitmap = cut,
-            context = src,
+            context = ctx,
             source = crop.source,
             bodyOffsetX = body.centerX() / w - 0.5f,
             bodyOffsetY = body.centerY() / h - 0.5f,

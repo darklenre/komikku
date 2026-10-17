@@ -569,6 +569,7 @@ object SettingsReaderScreen : SearchableSettings {
         val floatingGesturePref = readerPreferences.bubbleZoomFloatingGesture()
         val croppingMethodPref = readerPreferences.bubbleZoomCroppingMethod()
         val floatingBackdropPref = readerPreferences.bubbleZoomFloatingBackdrop()
+        val cutoutContextPref = readerPreferences.bubbleZoomCutoutContext()
         val confidencePref = readerPreferences.bubbleZoomConfidence()
         val confidence by confidencePref.collectAsState()
         val tapAnywherePref = readerPreferences.bubbleZoomTapAnywhere()
@@ -615,6 +616,12 @@ object SettingsReaderScreen : SearchableSettings {
                     preference = floatingBackdropPref,
                     title = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop),
                     subtitle = stringResource(KMR.strings.pref_bubble_zoom_floating_backdrop_summary),
+                    enabled = bubbleZoomSupported && isBubbleZoomEnabled,
+                ),
+                Preference.PreferenceItem.SwitchPreference(
+                    preference = cutoutContextPref,
+                    title = stringResource(KMR.strings.pref_bubble_zoom_cutout_context),
+                    subtitle = stringResource(KMR.strings.pref_bubble_zoom_cutout_context_summary),
                     enabled = bubbleZoomSupported && isBubbleZoomEnabled,
                 ),
                 Preference.PreferenceItem.SliderPreference(

@@ -257,7 +257,7 @@ Mitigazione del rischio "rendering": con il **contesto attenuato** un errore di 
 ## 7. Decisioni (utente, 17 ott)
 
 1. **Nuvolette collegate** (F2): **separate in sequenza** — ogni nuvoletta è un target, la navigazione le scorre in ordine.
-2. **Rendering:** **ritaglio pulito + contesto attenuato** — la nuvoletta a piena luminosità, il resto del crop scurito dietro; niente contorno sintetico.
+2. **Rendering:** **ritaglio pulito della sola nuvoletta, bordi netti** (predefinito); il contesto attenuato dietro è un'**opzione** (`bubble_zoom_cutout_context`, off). Niente contorno sintetico.
 3. **SAM 3 offline**: non necessario per ora (GT fatto con SAM 2.1-L).
 4. **Fase V5**: **più avanti**.
 5. Modifiche non committate a `CROP_MARGIN` / `BOUND_GROW`: messe in `git stash` (non cancellate); superate dalla v2.
@@ -287,5 +287,4 @@ implausibile (< 2 % o > 98 % del crop) → rettangolo arrotondato (F5). Maschere
 il prewarm per pagina le calcola in background **solo se l'encoder è su GPU** (su CPU costerebbe secondi per pagina).
 Rimossi: `BubbleFloodExtractor`, `snapToEdges`, `bridgeZones`, `clipToLobeRegion`, contorno sintetico + tracciamento, prewarm a livello pagina.
 
-**Rendering** (`BubbleZoomOverlayView`): il crop opaco (`BubbleCutout.context`) viene disegnato scurito dietro la nuvoletta
-ritagliata; inquadratura sul corpo della nuvoletta (i suoi blocchi di testo). Rimosse le preferenze contorno/spessore.
+**Rendering** (`BubbleZoomOverlayView`): di default solo la nuvoletta ritagliata; con l'opzione "contesto" il crop opaco (`BubbleCutout.context`) viene disegnato scurito dietro; inquadratura sul corpo della nuvoletta (i suoi blocchi di testo). Rimosse le preferenze contorno/spessore.
