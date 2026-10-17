@@ -48,6 +48,29 @@ class BubblePanelsTest {
     }
 
     @Test
+    fun `a panel overlapping the gutter between rows still reads row by row`() {
+        // two rows of two panels; the bottom-right one is drawn over the gutter (white border, no straight
+        // gutter across the page), so only the column cut exists: an XY-cut would read the left column first
+        val w = 200
+        val h = 300
+        val luma = FloatArray(w * h) { 250f }
+        fun panel(x0: Int, y0: Int, x1: Int, y1: Int, v: Float) {
+            for (y in y0 until y1) for (x in x0 until x1) luma[y * w + x] = v
+        }
+        panel(10, 10, 95, 100, 40f) // L1
+        panel(105, 10, 190, 100, 60f) // R1
+        panel(10, 110, 95, 290, 80f) // L2
+        panel(105, 85, 190, 290, 250f) // R2's white border over R1's bottom...
+        panel(108, 88, 187, 287, 100f) // ...and R2 itself
+        val names = BubblePanels.detect(luma, w, h, emptyList()).leaves(ReadingDirection.LTR).map { l ->
+            val left = (l.l + l.r) / 2 < 0.5f
+            val top = (l.t + l.b) / 2 < 0.25f
+            (if (left) "L" else "R") + (if (top) "1" else "2")
+        }
+        assertEquals(listOf("L1", "R1", "L2", "R2"), names)
+    }
+
+    @Test
     fun `bubbles are read panel by panel`() {
         val (luma, w, h) = page()
         val tree = BubblePanels.detect(luma, w, h, emptyList())

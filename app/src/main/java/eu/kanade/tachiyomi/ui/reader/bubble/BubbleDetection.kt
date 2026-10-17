@@ -23,8 +23,10 @@ import kotlinx.coroutines.launch
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.InputStream
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Entry point for Bubble Zoom detection: picks a [BubbleDetector] for the device, runs it off the
@@ -81,6 +83,9 @@ object BubbleDetection {
 
     /** Boxes from different tiles overlapping by more than this IoU are treated as the same bubble. */
     private const val MERGE_IOU = 0.4f
+
+    /** Long side, px, of the image the panels are looked for in. */
+    private const val PANELS_SIDE = 1200
 
     /** One horizontal slice of a tall (webtoon) page: full width, [topNorm]..[bottomNorm] of the page height. */
     class DetectionTile(val bitmap: Bitmap, val topNorm: Float, val bottomNorm: Float)
@@ -165,10 +170,19 @@ object BubbleDetection {
     }
 
     private fun panelsOf(bitmap: Bitmap, bubbles: List<Bubble>): PanelNode {
-        val w = bitmap.width
-        val h = bitmap.height
+        // panels are found at a fixed scale: the detection bitmap's long side varies (1024-2047 px), and
+        // more pixels only cost time (the thresholds are tuned at this size)
+        val scale = PANELS_SIDE.toFloat() / max(bitmap.width, bitmap.height)
+        val src = if (abs(scale - 1f) < 0.01f) {
+            bitmap
+        } else {
+            Bitmap.createScaledBitmap(bitmap, max(1, (bitmap.width * scale).roundToInt()), max(1, (bitmap.height * scale).roundToInt()), true)
+        }
+        val w = src.width
+        val h = src.height
         val px = IntArray(w * h)
-        bitmap.getPixels(px, 0, w, 0, 0, w, h)
+        src.getPixels(px, 0, w, 0, 0, w, h)
+        if (src !== bitmap) src.recycle()
         val luma = FloatArray(px.size) {
             val p = px[it]
             0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)

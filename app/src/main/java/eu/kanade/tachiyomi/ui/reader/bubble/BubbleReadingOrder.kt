@@ -18,6 +18,9 @@ enum class ReadingDirection { LTR, RTL, VERTICAL }
  */
 object BubbleReadingOrder {
 
+    /** Row (band) / column clustering threshold as a fraction of the median bubble height / width. */
+    private const val BAND_FACTOR = 0.6f
+
     /** Bubble box reduced to what the ordering needs — centre and size. */
     internal class Box(val cx: Float, val cy: Float, val w: Float, val h: Float)
 
@@ -25,7 +28,7 @@ object BubbleReadingOrder {
         bubbles: List<Bubble>,
         direction: ReadingDirection,
         panels: PanelNode? = null,
-        bandFactor: Float = 0.5f,
+        bandFactor: Float = BAND_FACTOR,
     ): List<Bubble> {
         if (bubbles.size <= 1) return bubbles
         val boxes = bubbles.map { Box(it.rect.centerX(), it.rect.centerY(), it.rect.width(), it.rect.height()) }
@@ -37,7 +40,7 @@ object BubbleReadingOrder {
         boxes: List<Box>,
         direction: ReadingDirection,
         leaves: List<PanelNode.Leaf>?,
-        bandFactor: Float = 0.5f,
+        bandFactor: Float = BAND_FACTOR,
     ): List<Int> {
         if (leaves.isNullOrEmpty() || leaves.size == 1) return orderIndices(boxes, direction, bandFactor)
         val groups = List(leaves.size) { mutableListOf<Int>() }
@@ -52,7 +55,7 @@ object BubbleReadingOrder {
     }
 
     /** The pure core of [sort]: returns a permutation of `boxes.indices` in reading order. */
-    internal fun orderIndices(boxes: List<Box>, direction: ReadingDirection, bandFactor: Float = 0.5f): List<Int> {
+    internal fun orderIndices(boxes: List<Box>, direction: ReadingDirection, bandFactor: Float = BAND_FACTOR): List<Int> {
         if (boxes.size <= 1) return boxes.indices.toList()
 
         val medianH = boxes.map { it.h }.sorted()[boxes.size / 2].coerceAtLeast(1e-4f)
