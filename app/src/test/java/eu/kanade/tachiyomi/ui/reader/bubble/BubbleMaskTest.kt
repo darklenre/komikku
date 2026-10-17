@@ -106,4 +106,34 @@ class BubbleMaskTest {
         assertTrue((0 until w).all { s[3 * w + it] })
         assertTrue((0 until w).all { s[5 * w + it] && !s[6 * w + it] })
     }
+
+    @Test
+    fun `inkSnap takes in the balloon outline but not a dark area next to it`() {
+        val w = 60
+        val h = 40
+        val luma = FloatArray(w * h) { 235f } // light background
+        val mask = BooleanArray(w * h)
+        for (y in 0 until h) {
+            for (x in 0 until w) {
+                val i = y * w + x
+                val inBalloon = x in 10..39 && y in 10..29
+                val inStroke = x in 7..42 && y in 7..32 && !inBalloon
+                when {
+                    inBalloon -> luma[i] = 255f
+                    inStroke -> luma[i] = 20f
+                    x >= 43 -> luma[i] = 15f // black panel / hair touching the right side of the stroke
+                }
+                mask[i] = inBalloon
+            }
+        }
+        val s = inkSnap(mask, luma, w, h, 4)
+        // left, top and bottom strokes (thin, light background beyond) are now in the cutout
+        assertTrue((7..9).all { s[20 * w + it] })
+        assertTrue((7..9).all { s[it * w + 25] })
+        assertTrue((30..32).all { s[it * w + 25] })
+        // nothing of the dark area right of the stroke
+        assertTrue((44 until w).none { s[20 * w + it] })
+        // background stays out
+        assertTrue(!s[20 * w + 3] && !s[2 * w + 25])
+    }
 }

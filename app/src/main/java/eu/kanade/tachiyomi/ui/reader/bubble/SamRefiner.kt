@@ -50,6 +50,9 @@ object SamRefiner {
     private const val MIN_COVER = 0.02f
     private const val MAX_COVER = 0.98f
 
+    /** Ink-snap reach as a fraction of the crop short side (see [inkSnap]). */
+    private const val SNAP_FRAC = 0.012f
+
     /** Mask smoothing radius = crop short side / this, 1..3 px (see [smoothMask]). */
     private const val SMOOTH_DIV = 150
 
@@ -152,8 +155,8 @@ object SamRefiner {
 
     /**
      * Segments the balloon prompted by [box] (px of [crop]) and returns its alpha (0..1, row-major,
-     * [crop]'s size): glyph holes filled, lightly smoothed, only the largest blob kept, a 1 px
-     * anti-aliased edge. Null
+     * [crop]'s size): glyph holes filled, lightly smoothed, only the largest blob kept, grown over the
+     * balloon's ink outline ([inkSnap]), a 1 px anti-aliased edge. Null
      * if SAM is unavailable or the mask is implausible (empty / the whole crop).
      *
      * @param foreground the caller is waiting on it with an open cutout (counted in [activeEncodes]
@@ -230,11 +233,22 @@ object SamRefiner {
             }
         }
         val smoothR = (min(w, h) / SMOOTH_DIV).coerceIn(1, 3)
-        val shape = largestBlob(smoothMask(fillHoles(inside, w, h), w, h, smoothR), w, h)
+        val blob = largestBlob(smoothMask(fillHoles(inside, w, h), w, h, smoothR), w, h)
+        val shape = inkSnap(blob, lumaOf(crop), w, h, (min(w, h) * SNAP_FRAC).roundToInt().coerceAtLeast(2))
         var n = 0
         for (v in shape) if (v) n++
         if (n < w * h * MIN_COVER || n > w * h * MAX_COVER) return null
         return antialias(shape, w, h)
+    }
+
+    /** Rec. 601 luma (0..255) of every pixel of [bmp]. */
+    private fun lumaOf(bmp: Bitmap): FloatArray {
+        val px = IntArray(bmp.width * bmp.height)
+        bmp.getPixels(px, 0, bmp.width, 0, 0, bmp.width, bmp.height)
+        return FloatArray(px.size) {
+            val p = px[it]
+            0.299f * ((p shr 16) and 0xFF) + 0.587f * ((p shr 8) and 0xFF) + 0.114f * (p and 0xFF)
+        }
     }
 
     /** Latches [disabledForSlowDevice] after a run of interactive encodes all slower than [SLOW_ENCODE_MS]. */

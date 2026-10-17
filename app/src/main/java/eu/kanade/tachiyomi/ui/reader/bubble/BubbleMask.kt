@@ -132,3 +132,102 @@ private fun boxBlur(src: FloatArray, w: Int, h: Int, r: Int): FloatArray {
     }
     return out
 }
+
+/**
+ * Grows [m] over the balloon's own ink outline, at crop resolution, so the cutout keeps the full dark
+ * border instead of stopping inside or halfway through it. [luma] is 0..255 per pixel. A pixel joins
+ * when it is ink (clearly darker than the balloon fill), at most [r] steps from the mask, and at most
+ * r+1 steps from a light pixel outside the mask — i.e. part of a thin stroke between fill and
+ * background, never a dark area such as hair or a black panel. One more ring of half-dark pixels
+ * gives the stroke its soft outer edge. Where the mask edge runs through uniform fill (a cut between
+ * linked balloons) it is smoothed harder. Balloons with a dark or saturated fill are returned as is.
+ */
+internal fun inkSnap(m: BooleanArray, luma: FloatArray, w: Int, h: Int, r: Int): BooleanArray {
+    val inner = erode4(m, w, h, 3)
+    val fill = median(luma, inner) ?: return m
+    if (fill < SNAP_MIN_FILL) return m
+    val inkMax = fill - maxOf(60f, 0.35f * fill)
+    val brightOut = BooleanArray(w * h) { !m[it] && luma[it] > fill - 40f }
+    val nearBright = dilate4(brightOut, w, h, r + 1)
+    var cur = m
+    for (step in 0 until r) {
+        val ring = dilate4(cur, w, h, 1)
+        val prev = cur
+        cur = BooleanArray(w * h) { prev[it] || (ring[it] && luma[it] < inkMax && nearBright[it]) }
+        if (cur.contentEquals(prev)) break
+    }
+    val ring = dilate4(cur, w, h, 1)
+    cur = BooleanArray(w * h) { cur[it] || (ring[it] && luma[it] < fill - 25f && nearBright[it]) }
+    cur = fillHoles(cur, w, h)
+
+    // Cut through uniform fill (linked balloon): edge pixels that are light with light pixels outside.
+    val eroded = erode4(cur, w, h, 1)
+    val brightNear = dilate4(brightOut, w, h, 1)
+    var edges = 0
+    var cuts = 0
+    val cut = BooleanArray(w * h)
+    for (i in cur.indices) {
+        if (!cur[i] || eroded[i]) continue
+        edges++
+        if (luma[i] > fill - 40f && brightNear[i]) {
+            cut[i] = true
+            cuts++
+        }
+    }
+    if (cuts > 0.05f * edges) {
+        var a = FloatArray(w * h) { if (cur[it]) 1f else 0f }
+        repeat(3) { a = boxBlur(a, w, h, 3) }
+        val zone = dilate4(cut, w, h, 6)
+        cur = BooleanArray(w * h) { if (zone[it]) a[it] >= 0.5f else cur[it] }
+    }
+    return cur
+}
+
+/** Below this fill luma the balloon isn't light enough for the ink outline to stand out. */
+private const val SNAP_MIN_FILL = 150f
+
+/** Median of [v] over the [where] pixels (0..255 histogram), or null if none. */
+private fun median(v: FloatArray, where: BooleanArray): Float? {
+    val hist = IntArray(256)
+    var n = 0
+    for (i in v.indices) {
+        if (!where[i]) continue
+        hist[v[i].toInt().coerceIn(0, 255)]++
+        n++
+    }
+    if (n < 50) return null
+    var acc = 0
+    for (b in 0 until 256) {
+        acc += hist[b]
+        if (acc * 2 >= n) return b.toFloat()
+    }
+    return 255f
+}
+
+/** [it] rounds of 4-neighbour dilation. */
+internal fun dilate4(m: BooleanArray, w: Int, h: Int, it: Int): BooleanArray {
+    var cur = m
+    repeat(it) {
+        val src = cur
+        cur = BooleanArray(w * h) { i ->
+            val x = i % w
+            src[i] || (x > 0 && src[i - 1]) || (x < w - 1 && src[i + 1]) ||
+                (i >= w && src[i - w]) || (i < w * (h - 1) && src[i + w])
+        }
+    }
+    return cur
+}
+
+/** [it] rounds of 4-neighbour erosion (outside the grid counts as unset). */
+internal fun erode4(m: BooleanArray, w: Int, h: Int, it: Int): BooleanArray {
+    var cur = m
+    repeat(it) {
+        val src = cur
+        cur = BooleanArray(w * h) { i ->
+            val x = i % w
+            src[i] && x > 0 && src[i - 1] && x < w - 1 && src[i + 1] &&
+                i >= w && src[i - w] && i < w * (h - 1) && src[i + w]
+        }
+    }
+    return cur
+}

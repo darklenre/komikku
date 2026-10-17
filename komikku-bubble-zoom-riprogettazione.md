@@ -185,6 +185,30 @@ Stesso harness (`BubbleEvalActivity`, build debug arm64, schermo tenuto acceso d
   test consecutivi ~580 ms, come la CPU (throttling termico). Resta su GPU (libera la CPU), gira comunque in background.
 - Lo schermo che si spegne/blocca falsava i tempi e congelava il processo: l'harness ora tiene lo schermo acceso.
 
+### 3.7 Bordi: prompt a punti e aggancio all'inchiostro (17 ott)
+
+Obiettivo utente: ritaglio pulito con **bordi perfettamente definiti** (contesto attenuato solo come opzione).
+
+- **Prompt a punti** (decoder ufficiale `edge_sam_3x_decoder.onnx`, l'encoder dell'app è `edge_sam_3x`, corr. 0,999):
+  box + punto positivo sul testo (+ negativi sulle vicine), maschera col punteggio migliore. Guadagno marginale
+  (ok +1 pt, persi 3,0 → 2,4 %; su 58 casi problematici ne sistema 14 e ne guasta 8) → **non adottato** (richiederebbe
+  un secondo decoder TFLite).
+- **Limite del GT sui bordi**: le maschere SAM 2.1 mettono il bordo a volte dentro, a volte fuori dal tratto nero, e
+  sono frastagliate di 1-2 px → BF non distingue più "bordo perfetto". Aggiunta una misura **senza GT**
+  (`scripts/outline_metric.py`): quota del bordo del ritaglio che include il contorno nero della nuvoletta.
+- **Aggancio all'inchiostro** (`inkSnap`, `scripts/inksnap.py`): la maschera cresce sul tratto scuro adiacente solo se è un
+  tratto sottile tra riempimento e sfondo chiaro (mai capelli/zone scure), + un anello di pixel semiscuri per il bordo
+  morbido; tagli tra nuvolette collegate nel riempimento uniforme levigati di più. Solo nuvolette a fondo chiaro.
+
+| | contorno nero incluso | contorno tagliato | BF (vs GT) | estranei | ritaglio Fold8 |
+|---|---|---|---|---|---|
+| GT (riferimento) | 68,2 % | 21,1 % | — | — | — |
+| app prima | 59,7 % | 31,7 % | 0,86 | 0,6 % | 204 ms |
+| **app + inkSnap (Kotlin, Fold8)** | **70,3 %** | **21,4 %** | 0,84 | 0,7 % | 207 ms |
+
+BF scende di 0,02 per la convenzione del GT (verificato a vista: i casi "peggiorati" hanno il contorno ora completo).
+Residuo visibile: taglio frastagliato dove due nuvolette collegate sono separate da una linea d'inchiostro ("I AM JOÃO!").
+
 ## 4. Panorama modelli (aggiornato ott 2026)
 
 | Modello | Tipo | Stili | Licenza | Note per noi |
