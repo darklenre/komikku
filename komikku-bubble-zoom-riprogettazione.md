@@ -166,6 +166,25 @@ Conseguenze per la v2:
 - **NPU (Hexagon)**: non raggiungibile con l'API Interpreter/NNAPI; la via moderna è LiteRT 2.x `CompiledModel` con
   acceleratore NPU Qualcomm (compilazione AOT/JIT del modello). Candidato per una fase successiva se la GPU non basta.
 
+### 3.6 Misurato sul Fold8 (SM-F971B, SM8850, 17 ott)
+
+Stesso harness (`BubbleEvalActivity`, build debug arm64, schermo tenuto acceso durante il run):
+
+| Configurazione | ok | IoU | BF | estranei | ritaglio mediana / p90 | detector (solo inferenza) |
+|---|---|---|---|---|---|---|
+| encoder + decoder SAM su GPU (default fp16) | 96 % | 0,64 | **0,04** | 29 % | — | GPU |
+| encoder GPU fp16, decoder CPU | 95,8 % | 0,88 | 0,78 | 2,0 % | 153 / 311 ms | GPU |
+| **encoder GPU fp32, decoder CPU** (scelto) | **95,8 %** | **0,90** | **0,86** | **0,6 %** | **204 / 352 ms** | GPU 578 ms |
+| detector solo CPU (XNNPACK 4 thread) | — | — | — | — | — | CPU 565 ms |
+
+- **Decoder SAM sulla GPU = maschere inutilizzabili** (con LiteRT 1.4.2 il delegate lo accetta ma restituisce logit errati;
+  il gate di plausibilità le scartava → tutto rettangolo arrotondato, senza errori nei log). Ora il decoder è forzato su CPU
+  (costa pochi ms). Senza il set di test sarebbe passato inosservato.
+- **Encoder SAM in fp16** sposta i bordi di qualche pixel → `setPrecisionLossAllowed(false)`: +50 ms, qualità pari alla CPU.
+- **Detector**: GPU partizionata (backbone su GPU, testa DETR su CPU). A dispositivo freddo 240-270 ms, dopo ~15 min di
+  test consecutivi ~580 ms, come la CPU (throttling termico). Resta su GPU (libera la CPU), gira comunque in background.
+- Lo schermo che si spegne/blocca falsava i tempi e congelava il processo: l'harness ora tiene lo schermo acceso.
+
 ## 4. Panorama modelli (aggiornato ott 2026)
 
 | Modello | Tipo | Stili | Licenza | Note per noi |

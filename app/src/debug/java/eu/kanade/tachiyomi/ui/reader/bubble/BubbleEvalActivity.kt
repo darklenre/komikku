@@ -7,6 +7,7 @@ import android.graphics.BitmapRegionDecoder
 import android.graphics.Rect
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import eu.kanade.tachiyomi.data.database.models.ChapterImpl
 import eu.kanade.tachiyomi.ui.reader.model.ReaderChapter
 import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
@@ -40,7 +41,17 @@ class BubbleEvalActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = File(getExternalFilesDir(null), "bzeval")
+        // Timings are only meaningful with the device awake: keep the screen on and show over the lock
+        // screen for the duration of the run (window flags, cleared when the activity finishes).
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(true)
+            setTurnScreenOn(true)
+        }
+        // External files dir (emulator); on devices where adb-pushed files there aren't visible to the
+        // app, push to /data/local/tmp and `run-as` copy them into the internal files dir instead.
+        val root = listOf(File(getExternalFilesDir(null), "bzeval"), File(filesDir, "bzeval"))
+            .firstOrNull { !File(it, "pages").listFiles().isNullOrEmpty() } ?: File(getExternalFilesDir(null), "bzeval")
         val out = File(root, "out").apply { mkdirs() }
         val pages = File(root, "pages").listFiles()?.sortedBy { it.name }.orEmpty()
         scope.launch {
@@ -56,6 +67,8 @@ class BubbleEvalActivity : Activity() {
 
     private suspend fun evalPage(index: Int, file: File, out: File) {
         val name = file.name.substringBeforeLast('.')
+        // Resume: a run interrupted (process frozen in background) keeps the pages it already wrote.
+        if (File(out, "$name.json").exists() && intent.getBooleanExtra("resume", true)) return
         val bytes = file.readBytes()
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)

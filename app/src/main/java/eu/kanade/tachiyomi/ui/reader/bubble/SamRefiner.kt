@@ -108,7 +108,9 @@ object SamRefiner {
             triedInit = true
             runCatching {
                 encoder = makeInterpreter(mmapVerifiedModel(context, ENCODER_ASSET, ENCODER_SHA)) { encBackend = it }
-                decoder = makeInterpreter(mmapVerifiedModel(context, DECODER_ASSET, DECODER_SHA)) { decBackend = it }
+                // Decoder stays on CPU: it is cheap, and on Adreno (LiteRT 1.4.2) the GPU delegate accepts it
+                // but returns garbage logits, so every mask failed the plausibility check.
+                decoder = makeInterpreter(mmapVerifiedModel(context, DECODER_ASSET, DECODER_SHA), allowGpu = false) { decBackend = it }
                 encoder?.let { e ->
                     val s = e.getInputTensor(0).shape()
                     encNhwc = s.size == 4 && s[3] == 3
@@ -309,7 +311,17 @@ object SamRefiner {
      * Qualcomm device and is slower than plain XNNPACK when it partitions.
      * [onBackend] is called with the chosen backend's name.
      */
-    private fun makeInterpreter(buffer: MappedByteBuffer, onBackend: (String) -> Unit): Interpreter {
+    private fun makeInterpreter(buffer: MappedByteBuffer, allowGpu: Boolean = true, onBackend: (String) -> Unit): Interpreter {
+        if (!allowGpu) {
+            onBackend("cpu")
+            return Interpreter(
+                buffer,
+                Interpreter.Options().apply {
+                    setUseXNNPACK(true)
+                    setNumThreads(4)
+                },
+            )
+        }
         val compat = CompatibilityList()
         // CompatibilityList's bundled denylist reports "unsupported" on some current Adreno parts it
         // simply doesn't know yet; EdgeSAM's RepViT graph is all conv, so we attempt the GPU delegate
@@ -317,7 +329,10 @@ object SamRefiner {
         val gpuSupported = compat.isDelegateSupportedOnThisDevice
         run {
             try {
-                val options = if (gpuSupported) compat.bestOptionsForThisDevice else GpuDelegate.Options()
+                // Full fp32 on the GPU: with the default fp16 the balloon edges drift a few px (eval set,
+                // Fold8: boundary F 0.78 vs 0.86 on CPU).
+                val options = (if (gpuSupported) compat.bestOptionsForThisDevice else GpuDelegate.Options())
+                    .setPrecisionLossAllowed(false)
                 val delegate = GpuDelegate(options)
                 val itp = Interpreter(buffer, Interpreter.Options().apply { addDelegate(delegate) })
                 delegates += delegate
