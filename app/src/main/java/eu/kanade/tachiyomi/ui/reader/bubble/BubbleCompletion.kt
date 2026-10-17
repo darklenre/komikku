@@ -370,6 +370,17 @@ object BubbleCompletion {
         val toEroded = distTo(eroded, w, h)
         shape = largestBlob(BooleanArray(n) { if (local[it]) toEroded[it] <= rr else shape[it] }, w, h)
         if (losesText(own, shape)) return null
+        // where the curve rejoins the mask's edge, the V between the two outlines leaves a dent: close it
+        val notches = BooleanArray(n) { hypot(it % w - ax, it / w - ay) <= reach || hypot(it % w - bx, it / w - by) <= reach }
+        val rc = max(rr, (NOTCH_CLOSE_FRAC * ab).roundToInt().toFloat())
+        // on a grid padded with empty space, so the crop border does not count as balloon
+        val p = rc.toInt() + 1
+        val pw = w + 2 * p
+        val pn = pw * (h + 2 * p)
+        val padded = BooleanArray(pn).also { s -> for (i in 0 until n) s[(i / w + p) * pw + i % w + p] = shape[i] }
+        val toShape = distTo(padded, pw, h + 2 * p)
+        val toOutside = distTo(BooleanArray(pn) { toShape[it] > rc }, pw, h + 2 * p)
+        shape = largestBlob(BooleanArray(n) { if (notches[it]) toOutside[(it / w + p) * pw + it % w + p] > rc else shape[it] }, w, h)
 
         val inkRgb = if (bandN > 0) {
             val cutoff = percentile(luma, band, 0.3f)
@@ -386,6 +397,27 @@ object BubbleCompletion {
         // outline along the rebuilt boundary, coverage from the distance to it so it joins the original stroke
         val final = shape
         val dist = distTo(BooleanArray(n) { !final[it] }, w, h, borderIsTarget = true)
+        // the corner where the two outlines met stays inside as dark blobs hanging off the outline: repaint
+        // them (with their antialiasing). Letters don't touch the outline, so they're left alone.
+        val dark = BooleanArray(n) { notches[it] && shape[it] && luma[it] < fill - 40f }
+        val junction = BooleanArray(n)
+        for (comp in components(dark, w, h, eight = true)) {
+            if (comp.any { dist[it] <= t + 0.5f }) for (i in comp) junction[i] = true
+        }
+        for (i in 0 until n) {
+            if (!shape[i] || dist[i] <= t + 0.5f || luma[i] >= fill - 10f) continue
+            val x = i % w
+            val y = i / w
+            var hit = false
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    val xx = x + dx
+                    val yy = y + dy
+                    if (xx in 0 until w && yy in 0 until h && junction[yy * w + xx]) hit = true
+                }
+            }
+            if (hit) out[i] = (out[i] and 0xFF000000.toInt()) or fillRgb
+        }
         val zone = dilate4(bulge, w, h, ti + 2)
         for (i in 0 until n) {
             if (!shape[i]) continue
@@ -404,6 +436,9 @@ object BubbleCompletion {
 
     /** Opening radius at the neck as a fraction of the chord (removes stubs of the neighbour's outline). */
     private const val OPEN_FRAC = 0.08f
+
+    /** Closing radius at the two notches as a fraction of the chord (fills the dent where the outlines met). */
+    private const val NOTCH_CLOSE_FRAC = 0.25f
 
     /** More than 5 % of our text box outside [shape]. */
     private fun losesText(own: BooleanArray, shape: BooleanArray): Boolean {

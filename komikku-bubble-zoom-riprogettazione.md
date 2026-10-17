@@ -235,7 +235,13 @@ Risultato sul set (56 pp. + la pagina utente): 76 nuvolette completate al collo,
 recuperato, morsi chiusi), 3-4 difetti minori residui (cuneo "We've got magic", puntino "D-meter's", gobba "HA.");
 rispetto al metodo sopra pari o meglio sulle 58 in comune. Kotlin = prototipo (IoU mediana 1,0, min 0,99; serve la distanza
 euclidea esatta — la chamfer cambiava l'esito dell'apertura — e i centri pixel interi nel riempimento del poligono).
-JVM desktop: mediana 0 ms (uscita anticipata), p90 6 ms, max ~150 ms.
+JVM desktop: mediana 0 ms (uscita anticipata), p90 6 ms, max ~150 ms. Fold8 (harness, a caldo): il collo aggiunge ~0–20 ms
+per ritaglio sulle pagine normali, ~60–95 ms sulle nuvolette collegate grandi (ritaglio intero 150–320 ms).
+Rifinitura agli intagli (stesso giorno): il cuneo e il puntino erano l'angolo a V dove i due contorni si incontravano,
+rimasto dentro la forma. Ora, entro R da A e da B: chiusura di raggio max(r, 0,25·AB) (su griglia imbottita di vuoto: il
+bordo del crop non conta come nuvoletta) e ridipintura col colore del riempimento delle macchie scure **attaccate al
+contorno** (le lettere non lo toccano; i box di testo invece sì, quindi escluderli non bastava). Spariti cuneo e puntino,
+gobba "HA." quasi spianata, ripuliti anche resti di retino/arte agli intagli su ~15 nuvolette; nessuna lettera toccata.
 
 **Tagli tra nuvolette collegate — raddrizzamento (provato, non adottato)** — `scripts/neckcut.py`: sostituire il tratto di bordo che attraversa il
 riempimento con la corda tra i due estremi. Anche con salvaguardie (oltre il taglio deve esserci un'altra nuvoletta rilevata,
