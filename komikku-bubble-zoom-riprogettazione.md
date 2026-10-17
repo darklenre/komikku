@@ -258,7 +258,8 @@ nuvoletta giusta.
 | | pagine esatte | coppie | successiva corretta |
 |---|---|---|---|
 | v1 `BubbleReadingOrder` (fasce → colonne) | 35 % | 94,8 % | 69,4 % |
-| **v2 vignette (XY-cut) + v1 dentro la vignetta** (Kotlin, Fold8) | **68 %** | **97,1 %** | **86,9 %** |
+| v2 vignette (XY-cut) + v1 dentro la vignetta (Kotlin, Fold8) | 68 % | 97,1 % | 86,9 % |
+| **v3 vignette come regioni tra canaline + band 0,6** (Kotlin, Fold8) | **72-75 %** | **97,5 %** | **88,0 %** |
 
 **Vignette** (`BubblePanels`): XY-cut ricorsivo sulle canaline — righe/colonne dritte del colore della canalina per tutta
 la regione (≥ 98,5 % dei pixel non coperti da nuvolette: le nuvolette che scavalcano una canalina non la nascondono).
@@ -266,6 +267,17 @@ Colore canalina sconosciuto → candidati (bordo pagina, bianco, nero), vince qu
 indipendente dalla direzione: RTL inverte solo le vignette affiancate. Calcolato sulla bitmap di detection (~10 ms).
 Residui: vignette inclinate/irregolari (Absolute, Monstress art nouveau) e ordine dentro la vignetta (scambi di 1-2
 nuvolette spesso ambigui). Varianti dell'ordine interno provate: nessun guadagno oltre il rumore.
+
+**v3 (17 ott, commit `60b96a831a`)** — prima le vignette come **regioni connesse di non-canalina** (le nuvolette contano
+come canalina; apertura 5×5 a 1200 px; regioni ≥ 1,5 % della pagina e ≥ 6 % per lato; scartata la cornice ≈ pagina
+poco piena; un box che contiene ≥ 2 altri è sfondo → scartato, un box dentro un solo box più grande è un pezzo di
+disegno → scartato), per il colore che dà più regioni con copertura ≥ 40 %; ordine con tagli ricorsivi righe→colonne
+sui box, sovrapposizione tollerata 15 %, altrimenti "prima in alto". Candidati colore: + colori delle righe/colonne
+uniformi (canaline grigie o sfumate, Absolute_S_04). Se nessun colore copre il 40 %: XY-cut come prima. Ricerca a lato
+lungo fisso 1200 px (la bitmap di detection varia 1024–2047). Fasce dentro la vignetta 0,6 (da 0,5). Risolte
+Absolute_S_03/04, Monstress_06, Saga_03, PK_026 (in parte). Provati e scartati: rete di canaline connessa al bordo (86 %),
+cornice pagina come canalina, solo righe uniformi come canalina. Costo: detection mediana +70 ms sul Fold.
+Limite delle euristiche ~88-89 %: per il 95 % servirebbe un modello di vignette (da misurare prima con Magi sul PC).
 
 ## 4. Panorama modelli (aggiornato ott 2026)
 
