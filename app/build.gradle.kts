@@ -311,10 +311,15 @@ dependencies {
 
     // KMK -->
     implementation(libs.palette.ktx)
-    // Bubble Zoom: LiteRT (successor of TensorFlow Lite; 2.16.1 mis-computes the RT-DETR detector)
-    implementation(libs.litert)
+    // Bubble Zoom: LiteRT 2.x CompiledModel (successor of TensorFlow Lite; 2.16.1 mis-computes the RT-DETR
+    // detector). ai-delivery only serves Play AI Packs, which Komikku doesn't use, and pulls in Play services.
+    implementation(libs.litert) {
+        exclude(group = "com.google.android.play", module = "ai-delivery")
+    }
     implementation(libs.litert.gpu)
-    implementation(libs.litert.gpu.api)
+    // Bubble Zoom NPU experiment (debug only): LiteRT's Qualcomm dispatch library + the QNN runtime it loads
+    debugImplementation(libs.litert.npu.qualcomm)
+    debugImplementation(libs.qnn.runtime)
     implementation(libs.haze)
     implementation(compose.colorpicker)
     implementation(projects.flagkit)
@@ -361,6 +366,23 @@ androidComponents {
         // Layout Inspector's Compose tree
         it.packaging.resources.excludes.add("META-INF/*.version")
     }
+    // KMK -->
+    onVariants(selector().withBuildType("debug")) {
+        // Bubble Zoom NPU: the Hexagon skel libraries are loaded from the extracted native library dir, and
+        // ahead-of-time compiled models need neither the on-device compiler nor the GPU/DSP/old-HTP backends.
+        it.packaging.jniLibs.useLegacyPackaging.set(true)
+        it.packaging.jniLibs.excludes.addAll(
+            listOf(
+                "**/libQnnHtpPrepare.so",
+                "**/libQnnGpu.so",
+                "**/libQnnDsp*.so",
+                "**/libQnnHtpV68*.so",
+                "**/libQnnHtpV69*.so",
+                "**/libLiteRtCompilerPlugin_Qualcomm.so",
+            ),
+        )
+    }
+    // KMK <--
 }
 
 buildscript {

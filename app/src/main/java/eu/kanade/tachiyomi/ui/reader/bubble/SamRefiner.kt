@@ -8,29 +8,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import logcat.LogPriority
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
-import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
-import java.io.Closeable
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
-import java.nio.MappedByteBuffer
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * EdgeSAM box-prompted balloon segmentation (EdgeSAM is Apache-2.0), backed by two TFLite models:
+ * EdgeSAM box-prompted balloon segmentation (EdgeSAM is Apache-2.0), backed by two LiteRT models:
  *  - `models/sam_encoder_edgesam.tflite`: `[1,3,1024,1024]` NCHW f32 -> image embedding `[1,256,64,64]`.
- *    RepViT backbone (pure convolution), so the TFLite GPU delegate runs the whole encode in hardware
- *    (~50 ms) instead of XNNPACK CPU (~350 ms / ~2 s).
+ *    RepViT backbone (pure convolution), so LiteRT's GPU accelerator runs the whole encode in hardware
+ *    (~50 ms) instead of the CPU (~350 ms / ~2 s).
  *  - `models/sam_decoder_edgesam.tflite`: (embedding, box `[1,4]` px in the 1024 frame) -> mask logits
  *    `[1,1,256,256]` + IoU `[1,1]`
  *
  * It runs on a crop around *one* balloon, not on the page: the 256² logit grid then spans a few hundred
  * page px (~1-2 px per cell) instead of the whole page (~12 px per cell), which is what made v1 edges
- * grainy. One encode per balloon; callers cache the resulting mask. Interpreters are created lazily
+ * grainy. One encode per balloon; callers cache the resulting mask. Models are compiled lazily
  * on first use and only when the SAM cutout method is selected.
  */
 object SamRefiner {
@@ -38,7 +31,7 @@ object SamRefiner {
     private const val ENCODER_ASSET = "models/sam_encoder_edgesam.tflite"
     private const val DECODER_ASSET = "models/sam_decoder_edgesam.tflite"
 
-    /** SHA-256 of the bundled assets — a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
+    /** SHA-256 of the bundled assets — a truncated/corrupt model otherwise SIGABRTs deep in LiteRT. */
     private const val ENCODER_SHA = "564f55425f04e5f5c8c7853fc3df8ca108a002b6de0deae328519fe02e03c23f"
     private const val DECODER_SHA = "8bbb8aafbbe447ca67b7235e115d6bdf5360afae27b5a43425c3d204d885807c"
 
@@ -72,20 +65,23 @@ object SamRefiner {
     private val encLock = Any()
     private val decLock = Any()
 
-    @Volatile
-    private var encoder: Interpreter? = null
+    /** Encoder input layout: the bundled encoder takes NCHW. */
+    private const val ENC_NHWC = false
+
+    private val ENCODER_IO = LiteRtModel.Io(listOf("args_0"), listOf("output_0"))
+
+    /** Decoder signature: inputs `args_0` (embedding), `args_1` (box); outputs mask logits, IoU. */
+    private val DECODER_IO = LiteRtModel.Io(listOf("args_0", "args_1"), listOf("output_0", "output_1"))
+    private const val DEC_EMBED_IN = 0
+    private const val DEC_BOX_IN = 1
+    private const val DEC_MASK_OUT = 0
 
     @Volatile
-    private var decoder: Interpreter? = null
-    private val delegates = mutableListOf<Closeable>()
-    private var encNhwc = false
-    private var decEmbedInIdx = 0
-    private var decBoxInIdx = 1
-    private var decMaskOutIdx = 0
-    private var decIouOutIdx = 1
+    private var encoder: LiteRtModel? = null
+
+    @Volatile
+    private var decoder: LiteRtModel? = null
     private var triedInit = false
-    private var encBackend = "cpu"
-    private var decBackend = "cpu"
 
     private var slowEncodeStreak = 0
 
@@ -113,24 +109,23 @@ object SamRefiner {
             if (triedInit || disabledForSlowDevice) return
             triedInit = true
             runCatching {
-                encoder = makeInterpreter(mmapVerifiedModel(context, ENCODER_ASSET, ENCODER_SHA)) { encBackend = it }
-                // Decoder stays on CPU: it is cheap, and on Adreno (LiteRT 1.4.2) the GPU delegate accepts it
-                // but returns garbage logits, so every mask failed the plausibility check.
-                decoder = makeInterpreter(mmapVerifiedModel(context, DECODER_ASSET, DECODER_SHA), allowGpu = false) { decBackend = it }
-                encoder?.let { e ->
-                    val s = e.getInputTensor(0).shape()
-                    encNhwc = s.size == 4 && s[3] == 3
-                }
-                decoder?.let { d ->
-                    for (i in 0 until d.inputTensorCount) {
-                        if (d.getInputTensor(i).shape().size >= 4) decEmbedInIdx = i else decBoxInIdx = i
-                    }
-                    for (i in 0 until d.outputTensorCount) {
-                        if (d.getOutputTensor(i).shape().size >= 4) decMaskOutIdx = i else decIouOutIdx = i
-                    }
-                }
+                // Full fp32 on the GPU: with fp16 the balloon edges drift a few px (eval set, Fold8: boundary
+                // F 0.78 vs 0.86 on CPU). EdgeSAM's RepViT encoder is pure convolution, so the GPU takes it whole.
+                encoder = LiteRtModel.open(
+                    context,
+                    ENCODER_ASSET,
+                    ENCODER_SHA,
+                    ENCODER_IO,
+                    LiteRtModel.Backend.GPU_FP32,
+                    LiteRtModel.Backend.CPU,
+                )
+                // Decoder stays on CPU: it is cheap, and on Adreno (LiteRT 1.4.2) the GPU delegate accepted it
+                // but returned garbage logits, so every mask failed the plausibility check.
+                decoder = LiteRtModel.open(context, DECODER_ASSET, DECODER_SHA, DECODER_IO, LiteRtModel.Backend.CPU)
                 if (isAvailable) {
-                    logcat(LogPriority.WARN) { "SamRefiner: EdgeSAM ready (encoder=$encBackend, decoder=$decBackend)" }
+                    logcat(LogPriority.WARN) {
+                        "SamRefiner: EdgeSAM ready (encoder=${encoder?.backend}, decoder=${decoder?.backend})"
+                    }
                 }
             }.onFailure {
                 logcat(LogPriority.ERROR) { "SamRefiner: init failed: ${it.message}" }
@@ -138,16 +133,14 @@ object SamRefiner {
                 // model) isn't retried on every call.
                 runCatching { encoder?.close() }
                 runCatching { decoder?.close() }
-                delegates.forEach { d -> runCatching { d.close() } }
-                delegates.clear()
                 encoder = null
                 decoder = null
             }
         }
     }
 
-    /** True when the encoder runs on the GPU delegate (cheap enough to precompute a whole page). */
-    val isFast: Boolean get() = encoder != null && encBackend.startsWith("gpu")
+    /** True when the encoder runs on the GPU (cheap enough to precompute a whole page). */
+    val isFast: Boolean get() = encoder?.backend?.startsWith("gpu") == true
 
     /** Loads the models if needed; false when SAM can't run (missing models, slow device). */
     fun prepare(context: Context): Boolean {
@@ -174,7 +167,7 @@ object SamRefiner {
         val nw = (w * gain).roundToInt().coerceIn(1, INPUT)
         val nh = (h * gain).roundToInt().coerceIn(1, INPUT)
 
-        // The interpreters are read under their lock: [close] takes the same locks, so it can't free one mid-run.
+        // The models are read under their lock: [close] takes the same locks, so it can't free one mid-run.
         val embedding = synchronized(encLock) {
             val enc = encoder ?: return null
             if (foreground) _activeEncodes.update { it + 1 }
@@ -189,35 +182,23 @@ object SamRefiner {
             }
         } ?: return null
 
-        val embIn = ByteBuffer.allocateDirect(EMBED_LEN * 4).order(ByteOrder.nativeOrder())
-        embIn.asFloatBuffer().put(embedding)
-        val boxIn = ByteBuffer.allocateDirect(4 * 4).order(ByteOrder.nativeOrder())
-        boxIn.asFloatBuffer().put(
-            floatArrayOf(
-                (box.left * gain).coerceIn(0f, INPUT.toFloat()),
-                (box.top * gain).coerceIn(0f, INPUT.toFloat()),
-                (box.right * gain).coerceIn(0f, INPUT.toFloat()),
-                (box.bottom * gain).coerceIn(0f, INPUT.toFloat()),
-            ),
+        val boxIn = floatArrayOf(
+            (box.left * gain).coerceIn(0f, INPUT.toFloat()),
+            (box.top * gain).coerceIn(0f, INPUT.toFloat()),
+            (box.right * gain).coerceIn(0f, INPUT.toFloat()),
+            (box.bottom * gain).coerceIn(0f, INPUT.toFloat()),
         )
-        val maskOut = ByteBuffer.allocateDirect(MASK * MASK * 4).order(ByteOrder.nativeOrder())
-        val iouOut = ByteBuffer.allocateDirect(4).order(ByteOrder.nativeOrder())
-        val inputs = arrayOfNulls<Any>(2)
-        inputs[decEmbedInIdx] = embIn
-        inputs[decBoxInIdx] = boxIn
-        val outputs = hashMapOf<Int, Any>(decMaskOutIdx to maskOut, decIouOutIdx to iouOut)
-
-        @Suppress("UNCHECKED_CAST")
-        val ok = synchronized(decLock) {
+        val logits = synchronized(decLock) {
             val dec = decoder ?: return null
-            runCatching { dec.runForMultipleInputsOutputs(inputs as Array<Any>, outputs) }
-                .onFailure { logcat(LogPriority.ERROR) { "SamRefiner: decoder run failed: ${it.message}" } }
-                .isSuccess
-        }
-        if (!ok) return null
-        maskOut.rewind()
-        val logits = FloatArray(MASK * MASK)
-        maskOut.asFloatBuffer().get(logits)
+            runCatching {
+                dec.writeInput(DEC_EMBED_IN, embedding)
+                dec.writeInput(DEC_BOX_IN, boxIn)
+                dec.run()
+                dec.readFloat(DEC_MASK_OUT)
+            }.onFailure { logcat(LogPriority.ERROR) { "SamRefiner: decoder run failed: ${it.message}" } }
+                .getOrNull()
+        } ?: return null
+        if (logits.size != MASK * MASK) return null
 
         // Logits cover the padded 1024 frame at 1/4 resolution; the crop occupies its top-left nw x nh.
         val inside = BooleanArray(w * h)
@@ -261,7 +242,7 @@ object SamRefiner {
             if (++slowEncodeStreak >= SLOW_ENCODE_STREAK_TO_DISABLE) {
                 disabledForSlowDevice = true
                 logcat(LogPriority.WARN) {
-                    "SamRefiner: encode ~${ms}ms (backend=$encBackend) x$slowEncodeStreak — disabling SAM refinement for this session"
+                    "SamRefiner: encode ~${ms}ms (backend=${encoder?.backend}) x$slowEncodeStreak — disabling SAM refinement for this session"
                 }
             }
         } else {
@@ -276,8 +257,6 @@ object SamRefiner {
                 synchronized(decLock) {
                     runCatching { encoder?.close() }
                     runCatching { decoder?.close() }
-                    delegates.forEach { runCatching { it.close() } }
-                    delegates.clear()
                     encoder = null
                     decoder = null
                     triedInit = false
@@ -286,7 +265,7 @@ object SamRefiner {
         }
     }
 
-    private fun runEncoder(enc: Interpreter, crop: Bitmap, nw: Int, nh: Int): FloatArray? {
+    private fun runEncoder(enc: LiteRtModel, crop: Bitmap, nw: Int, nh: Int): FloatArray? {
         val resized = Bitmap.createScaledBitmap(crop, nw, nh, true)
         val px = IntArray(nw * nh)
         resized.getPixels(px, 0, nw, 0, 0, nw, nh)
@@ -301,7 +280,7 @@ object SamRefiner {
                 val r = (((p shr 16) and 0xFF) - PIX_MEAN[0]) / PIX_STD[0]
                 val g = (((p shr 8) and 0xFF) - PIX_MEAN[1]) / PIX_STD[1]
                 val b = ((p and 0xFF) - PIX_MEAN[2]) / PIX_STD[2]
-                if (encNhwc) {
+                if (ENC_NHWC) {
                     val i = (y * INPUT + x) * 3
                     tmp[i] = r
                     tmp[i + 1] = g
@@ -315,64 +294,12 @@ object SamRefiner {
             }
         }
 
-        val inBuf = ByteBuffer.allocateDirect(3 * plane * 4).order(ByteOrder.nativeOrder())
-        inBuf.asFloatBuffer().put(tmp)
-        val outBuf = ByteBuffer.allocateDirect(EMBED_LEN * 4).order(ByteOrder.nativeOrder())
         return runCatching {
-            enc.run(inBuf, outBuf)
-            outBuf.rewind()
-            FloatArray(EMBED_LEN).also { outBuf.asFloatBuffer().get(it) }
+            enc.writeInput(0, tmp)
+            enc.run()
+            enc.readFloat(0).also { check(it.size == EMBED_LEN) { "unexpected embedding size ${it.size}" } }
         }.onFailure {
             logcat(LogPriority.ERROR) { "SamRefiner: encoder run failed: ${it.message}" }
         }.getOrNull()
-    }
-
-    /**
-     * Tries the GPU delegate, then XNNPACK CPU. EdgeSAM's RepViT encoder is pure convolution, so the
-     * GPU delegate accepts the whole graph (MobileSAM's TinyViT did not — it fell back to XNNPACK in
-     * 200+ tiny partitions). NNAPI is still not attempted: it was rejected the same way on the target
-     * Qualcomm device and is slower than plain XNNPACK when it partitions.
-     * [onBackend] is called with the chosen backend's name.
-     */
-    private fun makeInterpreter(buffer: MappedByteBuffer, allowGpu: Boolean = true, onBackend: (String) -> Unit): Interpreter {
-        if (!allowGpu) {
-            onBackend("cpu")
-            return Interpreter(
-                buffer,
-                Interpreter.Options().apply {
-                    setUseXNNPACK(true)
-                    setNumThreads(4)
-                },
-            )
-        }
-        val compat = CompatibilityList()
-        // CompatibilityList's bundled denylist reports "unsupported" on some current Adreno parts it
-        // simply doesn't know yet; EdgeSAM's RepViT graph is all conv, so we attempt the GPU delegate
-        // regardless and fall back to XNNPACK if interpreter creation actually throws.
-        val gpuSupported = compat.isDelegateSupportedOnThisDevice
-        run {
-            try {
-                // Full fp32 on the GPU: with the default fp16 the balloon edges drift a few px (eval set,
-                // Fold8: boundary F 0.78 vs 0.86 on CPU).
-                val options = (if (gpuSupported) compat.bestOptionsForThisDevice else GpuDelegate.Options())
-                    .setPrecisionLossAllowed(false)
-                val delegate = GpuDelegate(options)
-                val itp = Interpreter(buffer, Interpreter.Options().apply { addDelegate(delegate) })
-                delegates += delegate
-                onBackend(if (gpuSupported) "gpu" else "gpu(forced)")
-                return itp
-            } catch (t: Throwable) {
-                logcat(LogPriority.WARN) { "SamRefiner: GPU delegate init failed (compatList=$gpuSupported): ${t.message}" }
-            }
-        }
-        buffer.rewind()
-        onBackend("cpu")
-        return Interpreter(
-            buffer,
-            Interpreter.Options().apply {
-                setUseXNNPACK(true)
-                setNumThreads(4)
-            },
-        )
     }
 }

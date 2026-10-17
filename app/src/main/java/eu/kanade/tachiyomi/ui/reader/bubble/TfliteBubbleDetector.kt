@@ -7,133 +7,102 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.CompatibilityList
-import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.Executors
 
 /**
- * [BubbleDetector] backed by TensorFlow Lite / LiteRT and the bundled model
+ * [BubbleDetector] backed by LiteRT 2.x and the bundled model
  * `models/bubble_detector_v4s.tflite` (`ogkalu/comic-text-and-bubble-detector` "detector-v4-s",
  * RT-DETR-v2, Apache-2.0; conversion steps in `assets/models/NOTICE`).
  *
  * Input `[1, 640, 640, 3]` f32 RGB 0..1, the page *stretched* to 640x640 (the model was trained on
- * resized, not letterboxed, pages). Outputs, sorted by tensor name: labels `[1,300]` int64
+ * resized, not letterboxed, pages). Outputs, in signature order: labels `[1,300]` int64
  * (0 bubble, 1 text inside a bubble, 2 free text), boxes `[1,300,4]` x0,y0,x1,y1 normalised 0..1,
  * scores `[1,300]`. DETR emits one box per object, so no NMS is needed beyond dropping the odd
  * same-class duplicate.
  *
- * Runs on a single background thread. The GPU delegate is tried first (forced past CompatibilityList,
- * whose denylist misreports current Adreno parts — same as [SamRefiner]): it takes the convolutional
- * backbone, the bulk of the compute, while the DETR head's gathers / TopK / int64 casts stay on CPU.
- * If the delegate can't be created the whole graph runs on XNNPACK. The backend and per-page latency
+ * Runs on a single background thread: split between the NPU and the CPU when an ahead-of-time compiled
+ * encoder exists for this SoC (see [head]), else entirely on the CPU. The backend and per-page latency
  * are logged so real devices can be checked.
  */
 class TfliteBubbleDetector(context: Context) : BubbleDetector {
 
-    /** Inference and [close] both run on this one thread, so the interpreter is never freed mid-run. */
+    /** Inference and [close] both run on this one thread, so the model is never freed mid-run. */
     private val executor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "bubble-detect-tfl").apply { isDaemon = true }
     }
     private val dispatcher = executor.asCoroutineDispatcher()
 
+    /** The whole detector on GPU or CPU, when the NPU split below isn't available. */
     @Volatile
-    private var interpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate? = null
-    private var modelBuffer: java.nio.MappedByteBuffer? = null
-    private var backend = "cpu"
+    private var model: LiteRtModel? = null
+
+    /**
+     * NPU split: backbone + hybrid encoder ahead-of-time compiled for this SoC ([head], fully on the NPU) and
+     * the DETR decoder ([tail], CPU), joined at the flattened encoder memory `[1,8400,256]`. The decoder's
+     * gathers / TopK / int64 ops are what the NPU rejects.
+     */
+    @Volatile
+    private var head: LiteRtModel? = null
+    private var tail: LiteRtModel? = null
 
     private val pixels = IntArray(INPUT * INPUT)
-    private val input: ByteBuffer = ByteBuffer.allocateDirect(INPUT * INPUT * 3 * 4).order(ByteOrder.nativeOrder())
-    private val labels = Array(1) { LongArray(QUERIES) }
-    private val boxes = Array(1) { Array(QUERIES) { FloatArray(4) } }
-    private val scores = Array(1) { FloatArray(QUERIES) }
-
-    /** Output index of labels / boxes / scores (in that order when sorted by tensor name). */
-    private var outLabels = 0
-    private var outBoxes = 1
-    private var outScores = 2
+    private val input = FloatArray(INPUT * INPUT * 3)
 
     init {
         try {
-            // The .tflite asset is stored uncompressed (noCompress "tflite" in build.gradle.kts),
-            // so it can be mmap'd straight from the APK — no copy into filesDir, no full read into heap.
-            val buffer = mmapVerifiedModel(context, ASSET, ASSET_SHA)
-            modelBuffer = buffer
-            val interp = gpuInterpreter(buffer) ?: run {
-                buffer.rewind()
-                backend = "cpu"
-                Interpreter(
-                    buffer,
-                    Interpreter.Options().apply {
-                        setUseXNNPACK(true)
-                        setNumThreads(THREADS)
-                    },
-                )
+            openNpuSplit(context)
+            if (head == null) {
+                // No GPU: LiteRT 2.3's GPU accelerator changes this detector's boxes (fp16 and fp32 alike; Fold8
+                // eval: 15/57 pages differ from CPU, reading order 95.1 % vs 96.3 % next), while the CPU matches the
+                // reference and is no slower than the old GPU delegate was.
+                model = LiteRtModel.open(context, ASSET, ASSET_SHA, IO, LiteRtModel.Backend.CPU)
             }
-            val byName = (0 until interp.outputTensorCount).sortedBy { interp.getOutputTensor(it).name() }
-            outLabels = byName[0]
-            outBoxes = byName[1]
-            outScores = byName[2]
-            check(interp.getOutputTensor(outBoxes).shape().contentEquals(intArrayOf(1, QUERIES, 4))) {
-                "unexpected boxes shape ${interp.getOutputTensor(outBoxes).shape().contentToString()}"
-            }
-            interpreter = interp
             logcat(LogPriority.WARN) { "TfliteBubbleDetector: ready (backend=$backend)" }
         } catch (t: Throwable) {
             logcat(LogPriority.ERROR) { "TfliteBubbleDetector: session init failed: ${t.message}" }
         }
     }
 
-    /** GPU delegate interpreter (threads still used by the CPU-side partitions), or null if it can't be created. */
-    private fun gpuInterpreter(buffer: java.nio.MappedByteBuffer): Interpreter? {
-        val compat = CompatibilityList()
-        val supported = compat.isDelegateSupportedOnThisDevice
-        var delegate: GpuDelegate? = null
-        return try {
-            delegate = GpuDelegate(if (supported) compat.bestOptionsForThisDevice else GpuDelegate.Options())
-            val interp = Interpreter(
-                buffer,
-                Interpreter.Options().apply {
-                    addDelegate(delegate)
-                    setNumThreads(THREADS)
-                },
-            )
-            gpuDelegate = delegate
-            backend = if (supported) "gpu" else "gpu(forced)"
-            interp
-        } catch (t: Throwable) {
-            logcat(LogPriority.WARN) { "TfliteBubbleDetector: GPU delegate unavailable (compatList=$supported): ${t.message}" }
-            runCatching { delegate?.close() }
-            null
-        }
+    private fun openNpuSplit(context: Context) {
+        val headAsset = LiteRtModel.npuAsset(context, NPU_HEAD) ?: return
+        runCatching {
+            val h = LiteRtModel.open(context, null, LiteRtModel.Source(headAsset, null, LiteRtModel.Backend.NPU))
+            tail = try {
+                LiteRtModel.open(context, null, LiteRtModel.Source(NPU_TAIL_ASSET, null, LiteRtModel.Backend.CPU))
+            } catch (t: Throwable) {
+                h.close()
+                throw t
+            }
+            head = h
+        }.onFailure { logcat(LogPriority.WARN) { "TfliteBubbleDetector: NPU split unavailable: ${it.message}" } }
     }
 
-    override val isAvailable: Boolean get() = interpreter != null
+    private val backend: String get() = if (head != null) "npu+cpu" else model?.backend ?: "none"
+
+    override val isAvailable: Boolean get() = model != null || head != null
 
     override suspend fun detect(bitmap: Bitmap, confThreshold: Float): List<Bubble> {
-        if (interpreter == null) return emptyList()
+        if (!isAvailable) return emptyList()
         return withContext(dispatcher) {
             // closed while this call was queued: give up without an (empty) result that would be cached
-            val interp = interpreter ?: throw CancellationException("detector closed")
-            runCatching { infer(interp, bitmap, confThreshold) }
+            if (!isAvailable) throw CancellationException("detector closed")
+            runCatching { infer(bitmap, confThreshold) }
                 .onFailure { logcat(LogPriority.ERROR) { "TfliteBubbleDetector: inference failed: ${it.message}" } }
                 .getOrDefault(emptyList())
         }
     }
 
-    /** Frees the interpreter once the inference in flight (if any) is done; returns without waiting. */
+    /** Frees the model once the inference in flight (if any) is done; returns without waiting. */
     fun close() {
         try {
             executor.execute {
-                runCatching { interpreter?.close() }
-                interpreter = null
-                runCatching { gpuDelegate?.close() }
-                gpuDelegate = null
-                modelBuffer = null
+                runCatching { model?.close() }
+                runCatching { head?.close() }
+                runCatching { tail?.close() }
+                model = null
+                head = null
+                tail = null
             }
             executor.shutdown()
         } catch (t: Throwable) {
@@ -141,39 +110,59 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         }
     }
 
-    private fun infer(interp: Interpreter, bitmap: Bitmap, confThreshold: Float): List<Bubble> {
+    private fun infer(bitmap: Bitmap, confThreshold: Float): List<Bubble> {
         val scaled = Bitmap.createScaledBitmap(bitmap, INPUT, INPUT, true)
         scaled.getPixels(pixels, 0, INPUT, 0, 0, INPUT, INPUT)
         if (scaled != bitmap) scaled.recycle()
-        input.rewind()
-        val f = input.asFloatBuffer()
+        var i = 0
         for (p in pixels) {
-            f.put(((p shr 16) and 0xFF) / 255f)
-            f.put(((p shr 8) and 0xFF) / 255f)
-            f.put((p and 0xFF) / 255f)
+            input[i++] = ((p shr 16) and 0xFF) / 255f
+            input[i++] = ((p shr 8) and 0xFF) / 255f
+            input[i++] = (p and 0xFF) / 255f
         }
-        input.rewind()
 
-        val outputs = hashMapOf<Int, Any>(outLabels to labels, outBoxes to boxes, outScores to scores)
         val t0 = System.nanoTime()
-        interp.runForMultipleInputsOutputs(arrayOf(input), outputs)
+        val h = head
+        val t = tail
+        val labels: LongArray
+        val boxes: FloatArray
+        val scores: FloatArray
+        if (h != null && t != null) {
+            h.writeInput(0, input)
+            h.run()
+            t.writeInput(0, h.readFloat(0))
+            t.run()
+            boxes = t.readFloat(TAIL_BOXES)
+            labels = t.readLong(TAIL_LABELS)
+            scores = t.readFloat(TAIL_SCORES)
+        } else {
+            val m = model ?: throw CancellationException("detector closed")
+            m.writeInput(0, input)
+            m.run()
+            labels = m.readLong(OUT_LABELS)
+            boxes = m.readFloat(OUT_BOXES)
+            scores = m.readFloat(OUT_SCORES)
+        }
         logcat(LogPriority.DEBUG) { "TfliteBubbleDetector: inference ${(System.nanoTime() - t0) / 1_000_000}ms ($backend)" }
+        check(labels.size == QUERIES && boxes.size == QUERIES * 4 && scores.size == QUERIES) {
+            "unexpected output sizes ${labels.size} / ${boxes.size} / ${scores.size}"
+        }
 
         val balloons = ArrayList<FloatArray>()
         val texts = ArrayList<FloatArray>()
         for (q in 0 until QUERIES) {
-            val s = scores[0][q]
+            val s = scores[q]
             if (s < confThreshold) continue
-            val b = boxes[0][q]
+            val o = q * 4
             val box = floatArrayOf(
-                b[0].coerceIn(0f, 1f),
-                b[1].coerceIn(0f, 1f),
-                b[2].coerceIn(0f, 1f),
-                b[3].coerceIn(0f, 1f),
+                boxes[o].coerceIn(0f, 1f),
+                boxes[o + 1].coerceIn(0f, 1f),
+                boxes[o + 2].coerceIn(0f, 1f),
+                boxes[o + 3].coerceIn(0f, 1f),
                 s,
             )
             if (box[2] <= box[0] || box[3] <= box[1]) continue
-            when (labels[0][q].toInt()) {
+            when (labels[q].toInt()) {
                 LABEL_BUBBLE -> balloons += box
                 LABEL_TEXT_IN_BUBBLE -> texts += box
             }
@@ -184,12 +173,27 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     private companion object {
         const val ASSET = "models/bubble_detector_v4s.tflite"
 
-        /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
+        /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in LiteRT. */
         const val ASSET_SHA = "43264efa950091fc0d9d1451c8ccfad0a245ee98a9fd7023007e8a8d90c30cdf"
 
         const val INPUT = 640
         const val QUERIES = 300
-        const val THREADS = 4
+
+        val IO = LiteRtModel.Io(listOf("images"), listOf("output_0", "output_1", "output_2"))
+
+        /** Output indices in [IO]: `output_0..2` are labels, boxes, scores. */
+        const val OUT_LABELS = 0
+        const val OUT_BOXES = 1
+        const val OUT_SCORES = 2
+
+        /** NPU variant of the encoder half, see [LiteRtModel.npuAsset]. */
+        const val NPU_HEAD = "bubble_detector_v4s_head"
+
+        /** Decoder half (CPU, any SoC); its outputs, without a signature, are boxes, labels, scores. */
+        const val NPU_TAIL_ASSET = "models/npu/bubble_detector_v4s_tail.tflite"
+        const val TAIL_BOXES = 0
+        const val TAIL_LABELS = 1
+        const val TAIL_SCORES = 2
         const val LABEL_BUBBLE = 0
         const val LABEL_TEXT_IN_BUBBLE = 1
     }

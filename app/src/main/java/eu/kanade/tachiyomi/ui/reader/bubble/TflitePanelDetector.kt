@@ -6,11 +6,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import logcat.LogPriority
-import org.tensorflow.lite.Interpreter
-import org.tensorflow.lite.gpu.GpuDelegate
 import tachiyomi.core.common.util.system.logcat
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
@@ -25,8 +21,8 @@ import kotlin.math.roundToInt
  * pixels, objectness, class score. Boxes with `objectness * class` >= [CONF] go through class-agnostic
  * NMS ([NMS_IOU]).
  *
- * Same threading and delegate policy as [TfliteBubbleDetector]: one background thread, GPU delegate
- * forced past CompatibilityList, XNNPACK if the delegate can't be created.
+ * Same threading and backend policy as [TfliteBubbleDetector]: one background thread; the NPU when an
+ * ahead-of-time compiled variant exists for this SoC ([LiteRtModel.npuAsset]), else the CPU (~17 ms).
  */
 class TflitePanelDetector(context: Context) {
 
@@ -36,83 +32,43 @@ class TflitePanelDetector(context: Context) {
     private val dispatcher = executor.asCoroutineDispatcher()
 
     @Volatile
-    private var interpreter: Interpreter? = null
-    private var gpuDelegate: GpuDelegate? = null
-    private var modelBuffer: java.nio.MappedByteBuffer? = null
-    private var backend = "cpu"
+    private var model: LiteRtModel? = null
 
     private val pixels = IntArray(INPUT * INPUT)
-    private val input: ByteBuffer = ByteBuffer.allocateDirect(INPUT * INPUT * 3 * 4).order(ByteOrder.nativeOrder())
-    private val output = Array(1) { Array(ANCHORS) { FloatArray(6) } }
+    private val input = FloatArray(INPUT * INPUT * 3)
 
     init {
         try {
-            val buffer = mmapVerifiedModel(context, ASSET, ASSET_SHA)
-            modelBuffer = buffer
-            val interp = gpuInterpreter(buffer) ?: run {
-                buffer.rewind()
-                backend = "cpu"
-                Interpreter(
-                    buffer,
-                    Interpreter.Options().apply {
-                        setUseXNNPACK(true)
-                        setNumThreads(THREADS)
-                    },
-                )
-            }
-            check(interp.getOutputTensor(0).shape().contentEquals(intArrayOf(1, ANCHORS, 6))) {
-                "unexpected output shape ${interp.getOutputTensor(0).shape().contentToString()}"
-            }
-            interpreter = interp
-            logcat(LogPriority.WARN) { "TflitePanelDetector: ready (backend=$backend)" }
+            val sources = listOfNotNull(
+                LiteRtModel.npuAsset(context, NPU_NAME)?.let { LiteRtModel.Source(it, null, LiteRtModel.Backend.NPU) },
+                LiteRtModel.Source(ASSET, ASSET_SHA, LiteRtModel.Backend.CPU),
+            )
+            model = LiteRtModel.open(context, null, *sources.toTypedArray())
+            logcat(LogPriority.WARN) { "TflitePanelDetector: ready (backend=${model?.backend})" }
         } catch (t: Throwable) {
             logcat(LogPriority.ERROR) { "TflitePanelDetector: session init failed: ${t.message}" }
         }
     }
 
-    private fun gpuInterpreter(buffer: java.nio.MappedByteBuffer): Interpreter? {
-        var delegate: GpuDelegate? = null
-        return try {
-            delegate = GpuDelegate(GpuDelegate.Options())
-            val interp = Interpreter(
-                buffer,
-                Interpreter.Options().apply {
-                    addDelegate(delegate)
-                    setNumThreads(THREADS)
-                },
-            )
-            gpuDelegate = delegate
-            backend = "gpu"
-            interp
-        } catch (t: Throwable) {
-            logcat(LogPriority.WARN) { "TflitePanelDetector: GPU delegate unavailable: ${t.message}" }
-            runCatching { delegate?.close() }
-            null
-        }
-    }
-
-    val isAvailable: Boolean get() = interpreter != null
+    val isAvailable: Boolean get() = model != null
 
     /** Panel boxes `[l, t, r, b]` normalised 0..1 of [bitmap], or null when the model can't run. */
     suspend fun detect(bitmap: Bitmap): List<FloatArray>? {
-        if (interpreter == null) return null
+        if (model == null) return null
         return withContext(dispatcher) {
-            val interp = interpreter ?: throw CancellationException("panel detector closed")
-            runCatching { infer(interp, bitmap) }
+            val m = model ?: throw CancellationException("panel detector closed")
+            runCatching { infer(m, bitmap) }
                 .onFailure { logcat(LogPriority.ERROR) { "TflitePanelDetector: inference failed: ${it.message}" } }
                 .getOrNull()
         }
     }
 
-    /** Frees the interpreter once the inference in flight (if any) is done; returns without waiting. */
+    /** Frees the model once the inference in flight (if any) is done; returns without waiting. */
     fun close() {
         try {
             executor.execute {
-                runCatching { interpreter?.close() }
-                interpreter = null
-                runCatching { gpuDelegate?.close() }
-                gpuDelegate = null
-                modelBuffer = null
+                runCatching { model?.close() }
+                model = null
             }
             executor.shutdown()
         } catch (t: Throwable) {
@@ -120,7 +76,7 @@ class TflitePanelDetector(context: Context) {
         }
     }
 
-    private fun infer(interp: Interpreter, bitmap: Bitmap): List<FloatArray> {
+    private fun infer(m: LiteRtModel, bitmap: Bitmap): List<FloatArray> {
         val w = bitmap.width
         val h = bitmap.height
         val r = min(INPUT.toFloat() / w, INPUT.toFloat() / h)
@@ -129,36 +85,43 @@ class TflitePanelDetector(context: Context) {
         val scaled = Bitmap.createScaledBitmap(bitmap, nw, nh, true)
         scaled.getPixels(pixels, 0, nw, 0, 0, nw, nh)
         if (scaled != bitmap) scaled.recycle()
-        input.rewind()
-        val f = input.asFloatBuffer()
+        var i = 0
         for (y in 0 until INPUT) {
             for (x in 0 until INPUT) {
                 if (x < nw && y < nh) {
                     val p = pixels[y * nw + x]
-                    f.put((p and 0xFF).toFloat())
-                    f.put(((p shr 8) and 0xFF).toFloat())
-                    f.put(((p shr 16) and 0xFF).toFloat())
+                    input[i] = (p and 0xFF).toFloat()
+                    input[i + 1] = ((p shr 8) and 0xFF).toFloat()
+                    input[i + 2] = ((p shr 16) and 0xFF).toFloat()
                 } else {
-                    f.put(PAD)
-                    f.put(PAD)
-                    f.put(PAD)
+                    input[i] = PAD
+                    input[i + 1] = PAD
+                    input[i + 2] = PAD
                 }
+                i += 3
             }
         }
-        input.rewind()
 
         val t0 = System.nanoTime()
-        interp.run(input, output)
-        logcat(LogPriority.DEBUG) { "TflitePanelDetector: inference ${(System.nanoTime() - t0) / 1_000_000}ms ($backend)" }
+        m.writeInput(0, input)
+        m.run()
+        val out = m.readFloat(0)
+        logcat(LogPriority.DEBUG) { "TflitePanelDetector: inference ${(System.nanoTime() - t0) / 1_000_000}ms (${m.backend})" }
+        check(out.size == ANCHORS * 6) { "unexpected output size ${out.size}" }
 
         val boxes = ArrayList<FloatArray>()
-        for (a in output[0]) {
-            val score = a[4] * a[5]
+        for (k in 0 until ANCHORS) {
+            val o = k * 6
+            val score = out[o + 4] * out[o + 5]
             if (score < CONF) continue
-            val l = ((a[0] - a[2] / 2) / r / w).coerceIn(0f, 1f)
-            val t = ((a[1] - a[3] / 2) / r / h).coerceIn(0f, 1f)
-            val rr = ((a[0] + a[2] / 2) / r / w).coerceIn(0f, 1f)
-            val b = ((a[1] + a[3] / 2) / r / h).coerceIn(0f, 1f)
+            val cx = out[o]
+            val cy = out[o + 1]
+            val bw = out[o + 2]
+            val bh = out[o + 3]
+            val l = ((cx - bw / 2) / r / w).coerceIn(0f, 1f)
+            val t = ((cy - bh / 2) / r / h).coerceIn(0f, 1f)
+            val rr = ((cx + bw / 2) / r / w).coerceIn(0f, 1f)
+            val b = ((cy + bh / 2) / r / h).coerceIn(0f, 1f)
             if (rr > l && b > t) boxes += floatArrayOf(l, t, rr, b, score)
         }
         return nms(boxes, NMS_IOU)
@@ -167,12 +130,14 @@ class TflitePanelDetector(context: Context) {
     private companion object {
         const val ASSET = "models/panel_detector_v2.tflite"
 
-        /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
+        /** Name of the NPU variant of [ASSET] (same input and output). */
+        const val NPU_NAME = "panel_detector_v2"
+
+        /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in LiteRT. */
         const val ASSET_SHA = "005132193d259a9ca7b32b99d9f1b8ce30c830125fd2fe252de02f05249a679d"
 
         const val INPUT = 640
         const val ANCHORS = 8400
-        const val THREADS = 4
         const val PAD = 114f
         const val CONF = 0.3f
         const val NMS_IOU = 0.45f

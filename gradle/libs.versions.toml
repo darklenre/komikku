@@ -51,9 +51,11 @@ subsamplingscaleimageview = "com.github.tachiyomiorg:subsampling-scale-image-vie
 image-decoder = "com.github.tachiyomiorg:image-decoder:41c059e540"
 
 # KMK: on-device speech-bubble detection (Bubble Zoom)
-litert = "com.google.ai.edge.litert:litert:1.4.2"
-litert-gpu = "com.google.ai.edge.litert:litert-gpu:1.4.2"
-litert-gpu-api = "com.google.ai.edge.litert:litert-gpu-api:1.4.2"
+litert = "com.google.ai.edge.litert:litert:2.3.0"
+litert-gpu = "com.google.ai.edge.litert:litert-gpu:2.3.0"
+litert-npu-qualcomm = "com.google.ai.edge.litert:litert-npu-runtime-qualcomm:2.3.0"
+# QAIRT version LiteRT 2.3.0 is built against (Qualcomm AI Stack licence: not for the FOSS build)
+qnn-runtime = "com.qualcomm.qti:qnn-runtime:2.50.0"
 
 natural-comparator = "com.github.gpanther:java-nat-sort:natural-comparator-1.1"
 

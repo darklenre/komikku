@@ -163,6 +163,9 @@
 -dontwarn org.tensorflow.lite.**
 -keep class com.google.ai.edge.litert.** { *; }
 -dontwarn com.google.ai.edge.litert.**
+# ai-delivery (Play AI Packs) is excluded from the build; only the unused AiPackModelProvider refers to it
+-dontwarn com.google.android.play.core.aipacks.**
+-dontwarn com.google.android.play.core.assetpacks.**
 # KMK <--
 
 # Design library
