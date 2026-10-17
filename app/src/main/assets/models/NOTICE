@@ -38,9 +38,30 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
     sam_decoder_edgesam.tflite   box-prompted mask decoder, fp32 TFLite export.
 
 --------------------------------------------------------------------------------
+3. Panel detection
+--------------------------------------------------------------------------------
+  Name:     panel_detector_v1 (Komikku)
+  Base:     YOLOX-nano, Megvii (https://github.com/Megvii-BaseDetection/YOLOX),
+            COCO-pretrained weights
+  Licence:  Apache License 2.0
+
+  Single-class ("panel") detector fine-tuned for Komikku on comic, manga and
+  bande-dessinée pages. Training labels were the panel boxes on which several
+  automatic sources agreed (other panel detectors and a gutter heuristic);
+  no third-party model weights are included.
+
+  Bundled artifact:
+    panel_detector_v1.tflite
+      Input [1,640,640,3] BGR 0..255, page letterboxed at the top-left with
+      grey 114; output [1,8400,6] decoded boxes (cx, cy, w, h, objectness,
+      class). Exported to ONNX (opset 17, static shape), converted with
+      onnx2tf, fp16 weights.
+
+--------------------------------------------------------------------------------
 
 All bundled artifacts are derivative works of their respective source models,
-redistributed under the same licence as their source. No changes were made to
-trained weights beyond quantization / format conversion for on-device
-inference, and none to the model architecture beyond the conversion steps
-listed above.
+redistributed under the same licence as their source. For sections 1 and 2 no
+changes were made to trained weights beyond quantization / format conversion
+for on-device inference, and none to the model architecture beyond the
+conversion steps listed above. The section 3 model was trained (fine-tuned)
+for Komikku as described there.

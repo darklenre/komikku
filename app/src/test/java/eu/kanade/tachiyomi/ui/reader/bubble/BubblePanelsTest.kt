@@ -71,6 +71,42 @@ class BubblePanelsTest {
     }
 
     @Test
+    fun `model panel boxes are ordered row by row, columns flipped for RTL`() {
+        // a full-width top panel, then two side by side; given in scrambled order
+        val boxes = listOf(
+            floatArrayOf(0.52f, 0.36f, 0.95f, 0.95f), // right
+            floatArrayOf(0.05f, 0.05f, 0.95f, 0.33f), // top
+            floatArrayOf(0.05f, 0.36f, 0.48f, 0.95f), // left
+        )
+        val tree = BubblePanels.fromBoxes(boxes)
+        fun names(dir: ReadingDirection) = tree.leaves(dir).map {
+            if (it.t < 0.2f) {
+                "T"
+            } else if (it.l < 0.3f) {
+                "L"
+            } else {
+                "R"
+            }
+        }
+        assertEquals(listOf("T", "L", "R"), names(ReadingDirection.LTR))
+        assertEquals(listOf("T", "R", "L"), names(ReadingDirection.RTL))
+        assertEquals(1, BubblePanels.fromBoxes(emptyList()).leaves(ReadingDirection.LTR).size)
+    }
+
+    @Test
+    fun `nms keeps the best of overlapping panel boxes`() {
+        val kept = nms(
+            listOf(
+                floatArrayOf(0.1f, 0.1f, 0.5f, 0.5f, 0.6f),
+                floatArrayOf(0.12f, 0.1f, 0.5f, 0.52f, 0.9f),
+                floatArrayOf(0.6f, 0.1f, 0.9f, 0.5f, 0.5f),
+            ),
+        )
+        assertEquals(2, kept.size)
+        assertEquals(0.12f, kept[0][0])
+    }
+
+    @Test
     fun `bubbles are read panel by panel`() {
         val (luma, w, h) = page()
         val tree = BubblePanels.detect(luma, w, h, emptyList())

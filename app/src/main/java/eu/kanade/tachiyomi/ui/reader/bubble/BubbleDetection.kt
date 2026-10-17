@@ -51,6 +51,9 @@ object BubbleDetection {
     @Volatile
     private var detector: BubbleDetector? = null
 
+    @Volatile
+    private var panelDetector: TflitePanelDetector? = null
+
     private val _activeDetections = MutableStateFlow(0)
 
     /** How many page detections are running right now; drives the reader's processing indicator. */
@@ -121,7 +124,7 @@ object BubbleDetection {
                 ?.detect(bitmap, confThreshold)
                 ?: emptyList()
             if (result.size > 1) {
-                runCatching { panelsOf(bitmap, result) }.getOrNull()?.let { panelCache.put(key, it) }
+                runCatching { panelsOf(context.applicationContext, bitmap, result) }.getOrNull()?.let { panelCache.put(key, it) }
             }
             cache.put(key, result)
             return result
@@ -169,7 +172,9 @@ object BubbleDetection {
         }
     }
 
-    private fun panelsOf(bitmap: Bitmap, bubbles: List<Bubble>): PanelNode {
+    /** Panels from the panel model; the gutter heuristic ([BubblePanels.detect]) only when the model can't run. */
+    private suspend fun panelsOf(appContext: Context, bitmap: Bitmap, bubbles: List<Bubble>): PanelNode {
+        panelDetectorFor(appContext)?.detect(bitmap)?.let { return BubblePanels.fromBoxes(it) }
         // panels are found at a fixed scale: the detection bitmap's long side varies (1024-2047 px), and
         // more pixels only cost time (the thresholds are tuned at this size)
         val scale = PANELS_SIDE.toFloat() / max(bitmap.width, bitmap.height)
@@ -285,6 +290,7 @@ object BubbleDetection {
     fun releaseDetector() {
         val old = synchronized(this) { detector.also { detector = null } }
         (old as? TfliteBubbleDetector)?.close()
+        synchronized(this) { panelDetector.also { panelDetector = null } }?.close()
         // SAM's close waits for an encode in flight: not on the caller's (main) thread
         detectionScope.launch { SamRefiner.close() }
     }
@@ -302,10 +308,19 @@ object BubbleDetection {
         detectionScope.launch {
             if (!isSupported(appContext)) return@launch
             detectorFor(appContext)
+            panelDetectorFor(appContext)
             if (prefs.bubbleZoomCroppingMethod().get() == "sam" && !deviceUnderStress(appContext)) {
                 SamRefiner.prepare(appContext)
             }
         }
+    }
+
+    /** The panel model, or null when the device can't run it or it failed to load (the heuristic is used then). */
+    private fun panelDetectorFor(appContext: Context): TflitePanelDetector? {
+        val d = panelDetector ?: synchronized(this) {
+            panelDetector ?: if (isSupported(appContext)) TflitePanelDetector(appContext).also { panelDetector = it } else null
+        }
+        return d?.takeIf { it.isAvailable }
     }
 
     private fun detectorFor(appContext: Context): BubbleDetector {

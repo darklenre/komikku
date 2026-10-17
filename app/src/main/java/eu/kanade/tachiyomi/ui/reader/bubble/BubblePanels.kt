@@ -73,6 +73,15 @@ object BubblePanels {
             .maxBy { countLeaves(it) }
     }
 
+    /**
+     * Layout from panel boxes `[l, t, r, b]` (0..1) found by a model ([TflitePanelDetector]), ordered like
+     * the gutter regions. No boxes (a splash page, a page without panels) → the whole page as one panel.
+     */
+    fun fromBoxes(boxes: List<FloatArray>): PanelNode {
+        if (boxes.isEmpty()) return PanelNode.Leaf(0f, 0f, 1f, 1f)
+        return orderRegions(boxes.map { PanelNode.Leaf(it[0], it[1], it[2], it[3]) })
+    }
+
     private class Ctx(val w: Int, val h: Int, val wild: BooleanArray, val minGap: Int)
 
     /** Mode of a 2 % border ring (page margin colour), plus white and black when they differ from it. */
