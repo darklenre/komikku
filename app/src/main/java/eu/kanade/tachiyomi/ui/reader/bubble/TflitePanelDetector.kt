@@ -17,7 +17,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Panel detector backed by the bundled `models/panel_detector_v1.tflite`: a YOLOX-nano (Apache-2.0)
+ * Panel detector backed by the bundled `models/panel_detector_v2.tflite`: a YOLOX-nano (Apache-2.0)
  * trained for Komikku on a single "panel" class (provenance in `assets/models/NOTICE`).
  *
  * Input `[1, 640, 640, 3]` f32 **BGR 0..255**, the page scaled to fit and placed at the top-left of a
@@ -165,10 +165,10 @@ class TflitePanelDetector(context: Context) {
     }
 
     private companion object {
-        const val ASSET = "models/panel_detector_v1.tflite"
+        const val ASSET = "models/panel_detector_v2.tflite"
 
         /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in TFLite. */
-        const val ASSET_SHA = "3a58b3fcbf29eaaee3476d7edda0c691d891a9921ffe972b5479906a380f753b"
+        const val ASSET_SHA = "005132193d259a9ca7b32b99d9f1b8ce30c830125fd2fe252de02f05249a679d"
 
         const val INPUT = 640
         const val ANCHORS = 8400

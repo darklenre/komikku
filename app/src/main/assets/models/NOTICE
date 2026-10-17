@@ -40,18 +40,19 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
 --------------------------------------------------------------------------------
 3. Panel detection
 --------------------------------------------------------------------------------
-  Name:     panel_detector_v1 (Komikku)
+  Name:     panel_detector_v2 (Komikku)
   Base:     YOLOX-nano, Megvii (https://github.com/Megvii-BaseDetection/YOLOX),
             COCO-pretrained weights
   Licence:  Apache License 2.0
 
   Single-class ("panel") detector fine-tuned for Komikku on comic, manga and
   bande-dessinée pages. Training labels were the panel boxes on which several
-  automatic sources agreed (other panel detectors and a gutter heuristic);
-  no third-party model weights are included.
+  automatic sources agreed (other panel detectors and a gutter heuristic,
+  plus, for v2, the v1 model as an extra voter); no third-party model weights
+  are included.
 
   Bundled artifact:
-    panel_detector_v1.tflite
+    panel_detector_v2.tflite
       Input [1,640,640,3] BGR 0..255, page letterboxed at the top-left with
       grey 114; output [1,8400,6] decoded boxes (cx, cy, w, h, objectness,
       class). Exported to ONNX (opset 17, static shape), converted with
