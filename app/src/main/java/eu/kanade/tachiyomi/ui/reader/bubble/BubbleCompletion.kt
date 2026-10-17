@@ -2,14 +2,20 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.floor
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
  * Shape completion for linked balloons. Two balloons that share one fill are separated by the mask
- * along a cut through that fill, which leaves the cutout open and ragged on that side. Here the cut is
- * found, the missing stretch of outline is rebuilt as a smooth curve continuing the balloon's own
+ * along a cut through that fill, which leaves the cutout open and ragged on that side.
+ *
+ * [completeNeck] (tried first) finds where the shared shape pinches between the two texts and closes the
+ * balloon there, whatever path the mask's cut took (it often runs along the last line of letters).
+ * [complete] (fallback) starts from the mask's own cut instead. Both rebuild the missing stretch of outline is rebuilt as a smooth curve continuing the balloon's own
  * contour at both ends (Hermite spline with the contour tangents), the new bulge is painted with the
  * balloon's fill and the rebuilt boundary gets an outline in the balloon's ink colour — so the cutout
  * reads as a whole, standalone balloon.
@@ -18,7 +24,8 @@ import kotlin.math.sqrt
  */
 object BubbleCompletion {
 
-    class Result(val mask: BooleanArray, val pixels: IntArray)
+    /** [linked]: the neighbour text box the balloon was separated from, when known. */
+    class Result(val mask: BooleanArray, val pixels: IntArray, val linked: FloatArray? = null)
 
     /**
      * @param argb crop pixels (ARGB), [luma] their 0..255 luminance, [m] the balloon mask
@@ -35,17 +42,16 @@ object BubbleCompletion {
         h: Int,
         others: List<FloatArray>,
         ownText: List<FloatArray>,
-        log: (String) -> Unit = {},
     ): Result? {
         val inner = erode4(m, w, h, 3)
         val fill = medianOf(luma, inner) ?: return null
-        if (fill < MIN_FILL) return null.also { log("fill $fill") }
+        if (fill < MIN_FILL) return null
         val ink = BooleanArray(w * h) { luma[it] < fill - max(60f, 0.35f * fill) }
         val brightOut = BooleanArray(w * h) { !m[it] && luma[it] > fill - 40f }
         val edge = edgeOf(m, w, h)
         val brightNear = dilate4(brightOut, w, h, 1)
         val cutPx = BooleanArray(w * h) { edge[it] && luma[it] > fill - 40f && brightNear[it] }
-        val cut = findCut(cutPx, ink, brightOut, w, h, others) ?: return null.also { log("no cut") }
+        val cut = findCut(cutPx, ink, brightOut, w, h, others) ?: return null
         val ax = cut.ax
         val ay = cut.ay
         val bx = cut.bx
@@ -97,8 +103,8 @@ object BubbleCompletion {
         val runNear = dilate4(runMask, w, h, 3)
         val outline = BooleanArray(w * h) { edge[it] && !runNear[it] }
         val reach = max(5f, 0.25f * ab)
-        val ta = tangent(outline, w, h, ax, ay, bx, by, reach) ?: return null.also { log("no tangent A") }
-        val tb = tangent(outline, w, h, bx, by, ax, ay, reach) ?: return null.also { log("no tangent B") }
+        val ta = tangent(outline, w, h, ax, ay, bx, by, reach) ?: return null
+        val tb = tangent(outline, w, h, bx, by, ax, ay, reach) ?: return null
 
         // the new stretch of outline, and the bulge between it and the chord
         val curve = hermite(ax, ay, bx, by, ta[0] * ab, ta[1] * ab, -tb[0] * ab, -tb[1] * ab, CURVE_POINTS)
@@ -106,7 +112,7 @@ object BubbleCompletion {
         for (k in 0 until CURVE_POINTS) {
             meanSide += ((curve[2 * k] - ax) * nx + (curve[2 * k + 1] - ay) * ny) * sText
         }
-        if (meanSide > 0f) return null.also { log("inward") } // would bulge into our own balloon
+        if (meanSide > 0f) return null // would bulge into our own balloon
         val bulge = fillPolygon(curve, w, h)
 
         var m2 = fillHoles(BooleanArray(w * h) { keep[it] || bulge[it] }, w, h)
@@ -129,7 +135,7 @@ object BubbleCompletion {
         m2 = largestBlob(m2, w, h)
         val before = m.count { it }
         val after = m2.count { it }
-        if (after > 1.35f * before || after < 0.8f * before) return null.also { log("size $before -> $after") }
+        if (after > 1.35f * before || after < 0.8f * before) return null
 
         // outline look: thickness = ink band area / edge length; colour = the dark core of the stroke
         val edgeBand = dilate4(edge, w, h, 6)
@@ -170,7 +176,323 @@ object BubbleCompletion {
         return Result(m2, out)
     }
 
+    /**
+     * Neck-based completion. F = the fill shared with our text (light pixels plus text boxes); when it
+     * also holds a neighbour's text, the balloons are linked and the neck notches are, on each side of
+     * the axis between the two texts, the F-boundary points closest to that axis. The chord between the
+     * notches separates the balloons; only the area around it changes, the mask's edge elsewhere is kept.
+     *
+     * @param ownText this balloon's text boxes, [otherText] the other balloons' text boxes (crop px)
+     * @return the completed mask and repainted pixels, or null when the balloon is not cut at a neck
+     */
+    fun completeNeck(
+        argb: IntArray,
+        luma: FloatArray,
+        m: BooleanArray,
+        w: Int,
+        h: Int,
+        ownText: List<FloatArray>,
+        otherText: List<FloatArray>,
+    ): Result? {
+        if (ownText.isEmpty()) return null
+        val n = w * h
+        val inner = erode4(m, w, h, 3)
+        val fill = medianOf(luma, inner) ?: return null
+        if (fill < MIN_FILL) return null
+        val ink = BooleanArray(n) { luma[it] < fill - max(60f, 0.35f * fill) }
+        val own = boxMask(ownText, w, h, 1)
+        val near = otherText.filter { it[2] > 0 && it[0] < w && it[3] > 0 && it[1] < h }
+        if (near.isEmpty()) return null
+        val nearBox = boxMask(near, w, h, 1)
+        val light = BooleanArray(n) { luma[it] > fill - 40f || own[it] || nearBox[it] }
+        val lab = labels(light, w, h)
+        val ids = HashSet<Int>()
+        for (i in 0 until n) if (own[i] && lab[i] > 0) ids += lab[i]
+        if (ids.isEmpty()) return null
+        val f = fillHoles(BooleanArray(n) { lab[it] in ids }, w, h)
+
+        var c1x = 0f
+        var c1y = 0f
+        for (t in ownText) {
+            c1x += (t[0] + t[2]) / 2
+            c1y += (t[1] + t[3]) / 2
+        }
+        c1x /= ownText.size
+        c1y /= ownText.size
+        // the neighbour whose text sits in the same fill (the nearest, if several)
+        val linked = near.filter {
+            val cx = ((it[0] + it[2]) / 2).toInt().coerceIn(0, w - 1)
+            val cy = ((it[1] + it[3]) / 2).toInt().coerceIn(0, h - 1)
+            f[cy * w + cx]
+        }.minByOrNull { hypot((it[0] + it[2]) / 2 - c1x, (it[1] + it[3]) / 2 - c1y) } ?: return null
+        val c2x = (linked[0] + linked[2]) / 2
+        val c2y = (linked[1] + linked[3]) / 2
+        val len = hypot(c2x - c1x, c2y - c1y)
+        if (len < 10f) return null
+        val ux = (c2x - c1x) / len
+        val uy = (c2y - c1y) / len
+
+        // F boundary (the crop border is not an outline), minus the text boxes' straight edges
+        val tbox = boxMask(ownText + near, w, h, 3)
+        val edgeF = BooleanArray(n) { i ->
+            if (!f[i]) return@BooleanArray false
+            val x = i % w
+            (x > 0 && !f[i - 1]) || (x < w - 1 && !f[i + 1]) || (i >= w && !f[i - w]) || (i < n - w && !f[i + w])
+        }
+        val notch = FloatArray(4)
+        for ((k, sgn) in floatArrayOf(1f, -1f).withIndex()) {
+            var best = Float.MAX_VALUE
+            for (i in 0 until n) {
+                if (!edgeF[i] || tbox[i]) continue
+                val dx = i % w - c1x
+                val dy = i / w - c1y
+                val tt = dx * ux + dy * uy
+                val ss = -dx * uy + dy * ux
+                if (tt <= 0.15f * len || tt >= 0.85f * len || ss * sgn <= 2f) continue
+                if (abs(ss) < best) {
+                    best = abs(ss)
+                    notch[2 * k] = (i % w).toFloat()
+                    notch[2 * k + 1] = (i / w).toFloat()
+                }
+            }
+            if (best == Float.MAX_VALUE) return null
+        }
+        val ax = notch[0]
+        val ay = notch[1]
+        val bx = notch[2]
+        val by = notch[3]
+        val ab = hypot(bx - ax, by - ay)
+        if (ab < 6f) return null
+        // a real neck is a pinch: much narrower than our balloon across the same direction
+        var lo = Float.MAX_VALUE
+        var hi = -Float.MAX_VALUE
+        for (i in 0 until n) {
+            if (!m[i]) continue
+            val p = ((i % w) * (bx - ax) + (i / w) * (by - ay)) / ab
+            lo = min(lo, p)
+            hi = max(hi, p)
+        }
+        if (ab > 0.8f * (hi - lo)) return null
+        if (!inkNear(ink, w, h, ay.toInt() * w + ax.toInt(), 4) || !inkNear(ink, w, h, by.toInt() * w + bx.toInt(), 4)) {
+            return null
+        }
+        // the mask must actually be cut through the shared fill near the neck (light edge, light beyond)...
+        val mEdge = edgeOf(m, w, h)
+        val beyond = dilate4(BooleanArray(n) { !m[it] && luma[it] > fill - 40f }, w, h, 2)
+        val mx = (ax + bx) / 2
+        val my = (ay + by) / 2
+        var cutN = 0
+        for (i in 0 until n) {
+            if (mEdge[i] && luma[i] > fill - 40f && beyond[i] && hypot(i % w - mx, i / w - my) <= 0.75f * ab) cutN++
+        }
+        if (cutN < 0.25f * ab) return null
+        // ...and close to the chord: the neck rebuilds a cut, it does not grow the balloon into the art
+        val toM = distTo(m, w, h)
+        val chordD = FloatArray(CHORD_SAMPLES) { k ->
+            val t = k.toFloat() / (CHORD_SAMPLES - 1)
+            val x = (ax + (bx - ax) * t).toInt().coerceIn(0, w - 1)
+            val y = (ay + (by - ay) * t).toInt().coerceIn(0, h - 1)
+            toM[y * w + x]
+        }
+        chordD.sort()
+        if (chordD[CHORD_SAMPLES / 2] > 0.22f * ab) return null
+
+        val cnx = -(by - ay) / ab
+        val cny = (bx - ax) / ab
+        val sText = if ((c1x - ax) * cnx + (c1y - ay) * cny < 0f) -1f else 1f
+        val side = FloatArray(n)
+        val along = FloatArray(n)
+        val ours = BooleanArray(n)
+        val neckband = BooleanArray(n)
+        for (i in 0 until n) {
+            val dx = i % w - ax
+            val dy = i / w - ay
+            side[i] = dx * cnx + dy * cny
+            along[i] = (dx * (bx - ax) + dy * (by - ay)) / ab
+            ours[i] = side[i] * sText >= 0f
+            neckband[i] = along[i] >= -2f && along[i] <= ab + 2f && abs(side[i]) <= 0.5f * ab
+        }
+        // our balloon = (mask or the shared fill near the neck, plus our own text) on our side of the chord
+        var base = fillHoles(BooleanArray(n) { (m[it] || (f[it] && (neckband[it] || own[it]))) && ours[it] }, w, h)
+        val c1 = c1y.toInt().coerceIn(0, h - 1) * w + c1x.toInt().coerceIn(0, w - 1)
+        if (base[c1]) base = componentAt(base, w, h, c1)
+
+        // contour tangents at the notches: F boundary on our side, away from the chord
+        val keepE = BooleanArray(n) { edgeF[it] && ours[it] && abs(side[it]) > 2f }
+        val reach = max(6f, 0.3f * ab)
+        val ta = tangent(keepE, w, h, ax, ay, bx, by, reach) ?: return null
+        val tb = tangent(keepE, w, h, bx, by, ax, ay, reach) ?: return null
+        val k = TANGENT_SCALE * ab
+        val curve = hermite(ax, ay, bx, by, ta[0] * k, ta[1] * k, -tb[0] * k, -tb[1] * k, CURVE_POINTS)
+        var meanSide = 0f
+        for (j in 0 until CURVE_POINTS) meanSide += ((curve[2 * j] - ax) * cnx + (curve[2 * j + 1] - ay) * cny) * sText
+        if (meanSide > 0f) return null // would bulge into our own balloon
+        val poly = fillPolygon(
+            curve.copyOf(2 * CURVE_POINTS + 2).also {
+                it[2 * CURVE_POINTS] = ax
+                it[2 * CURVE_POINTS + 1] = ay
+            },
+            w,
+            h,
+        )
+        val bulge = BooleanArray(n) { poly[it] && along[it] >= 0f && along[it] <= ab } // no overshoot past the notches
+        var shape = fillHoles(BooleanArray(n) { base[it] || bulge[it] }, w, h)
+
+        // outline: grow over the ink stroke along the new edge only; past A/B the outline is the neighbour's
+        val nearBright = distTo(BooleanArray(n) { !shape[it] && luma[it] > fill - 40f }, w, h)
+        val grow = BooleanArray(n) { ink[it] && nearBright[it] <= 6f && ours[it] && along[it] > 0f && along[it] < ab }
+        repeat(6) {
+            val ring = dilate4(shape, w, h, 1)
+            val prev = shape
+            shape = BooleanArray(n) { prev[it] || (ring[it] && grow[it]) }
+        }
+        shape = fillHoles(shape, w, h)
+        // only the neck changes: elsewhere the mask's (ink-snapped) edge is kept as is
+        val rDisc = reach + 4f
+        val local = dilate4(BooleanArray(n) { bulge[it] || (neckband[it] && ours[it]) }, w, h, 6).also { l ->
+            for (i in 0 until n) {
+                if (hypot(i % w - ax, i / w - ay) <= rDisc || hypot(i % w - bx, i / w - by) <= rDisc) l[i] = true
+            }
+        }
+        shape = largestBlob(fillHoles(BooleanArray(n) { if (local[it]) shape[it] else m[it] }, w, h), w, h)
+        if (losesText(own, shape)) return null
+
+        // outline look: thickness = ink band area / edge length; colour = the dark core of the stroke
+        val edgeBand = dilate4(mEdge, w, h, 6)
+        val band = BooleanArray(n) { ink[it] && m[it] && edgeBand[it] }
+        val bandN = band.count { it }
+        val t = (bandN.toFloat() / max(mEdge.count { it }, 1)).coerceIn(1f, max(1f, 0.03f * min(w, h))).coerceAtLeast(1.5f)
+        val ti = ceil(t).toInt()
+        // spikes at the notches (bits of the neighbour's outline) are opened away
+        val rr = max(ti + 1, (OPEN_FRAC * ab).roundToInt()).toFloat()
+        val inside = shape.copyOf()
+        val eroded = BooleanArray(n).also { e -> distTo(BooleanArray(n) { !inside[it] }, w, h, borderIsTarget = true).forEachIndexed { i, d -> e[i] = d > rr } }
+        val toEroded = distTo(eroded, w, h)
+        shape = largestBlob(BooleanArray(n) { if (local[it]) toEroded[it] <= rr else shape[it] }, w, h)
+        if (losesText(own, shape)) return null
+
+        val inkRgb = if (bandN > 0) {
+            val cutoff = percentile(luma, band, 0.3f)
+            medianRgb(argb, BooleanArray(n) { band[it] && luma[it] <= cutoff })
+        } else {
+            0x141414
+        }
+        val fillRgb = medianRgb(argb, BooleanArray(n) { inner[it] && luma[it] > fill - 20f })
+        val out = argb.copyOf()
+        // the bulge beyond the chord is repainted as clean fill: it hides the neighbour's letters and outline
+        for (i in 0 until n) {
+            if (bulge[i] && shape[i] && !ours[i] && !own[i]) out[i] = (out[i] and 0xFF000000.toInt()) or fillRgb
+        }
+        // outline along the rebuilt boundary, coverage from the distance to it so it joins the original stroke
+        val final = shape
+        val dist = distTo(BooleanArray(n) { !final[it] }, w, h, borderIsTarget = true)
+        val zone = dilate4(bulge, w, h, ti + 2)
+        for (i in 0 until n) {
+            if (!shape[i]) continue
+            if (!zone[i] && hypot(i % w - ax, i / w - ay) > reach && hypot(i % w - bx, i / w - by) > reach) continue
+            val cov = (t + 0.5f - dist[i]).coerceIn(0f, 1f)
+            if (cov > 0f) out[i] = (out[i] and 0xFF000000.toInt()) or blend(out[i], inkRgb, cov)
+        }
+        return Result(shape, out, linked)
+    }
+
     private const val MIN_FILL = 150f
+    private const val CHORD_SAMPLES = 50
+
+    /** Hermite tangent length as a fraction of the chord: longer overshoots past the notches. */
+    private const val TANGENT_SCALE = 0.7f
+
+    /** Opening radius at the neck as a fraction of the chord (removes stubs of the neighbour's outline). */
+    private const val OPEN_FRAC = 0.08f
+
+    /** More than 5 % of our text box outside [shape]. */
+    private fun losesText(own: BooleanArray, shape: BooleanArray): Boolean {
+        var total = 0
+        var lost = 0
+        for (i in own.indices) {
+            if (!own[i]) continue
+            total++
+            if (!shape[i]) lost++
+        }
+        return total > 0 && lost > 0.05f * total
+    }
+
+    /** Union of [boxes] `[l,t,r,b]` grown by [pad] px, clipped to the grid. */
+    private fun boxMask(boxes: List<FloatArray>, w: Int, h: Int, pad: Int): BooleanArray {
+        val z = BooleanArray(w * h)
+        for (b in boxes) {
+            val x0 = max(0, b[0].toInt() - pad)
+            val x1 = min(w - 1, b[2].toInt() + pad)
+            val y0 = max(0, b[1].toInt() - pad)
+            val y1 = min(h - 1, b[3].toInt() + pad)
+            for (y in y0..y1) for (x in x0..x1) z[y * w + x] = true
+        }
+        return z
+    }
+
+    /** The 4-connected component of [m] holding pixel [seed]. */
+    private fun componentAt(m: BooleanArray, w: Int, h: Int, seed: Int): BooleanArray {
+        val lab = labels(m, w, h)
+        val l = lab[seed]
+        return BooleanArray(w * h) { lab[it] == l }
+    }
+
+    /**
+     * Exact Euclidean distance in px from every pixel to the nearest [target] pixel (0 on it), by two
+     * passes of the 1-D lower envelope of parabolas (Felzenszwalb-Huttenlocher). With [borderIsTarget]
+     * the cells just outside the grid count as target too.
+     */
+    internal fun distTo(target: BooleanArray, w: Int, h: Int, borderIsTarget: Boolean = false): FloatArray {
+        val inf = 1e12f
+        val pad = if (borderIsTarget) 1 else 0
+        val pw = w + 2 * pad
+        val ph = h + 2 * pad
+        val g = FloatArray(pw * ph) { i ->
+            val x = i % pw - pad
+            val y = i / pw - pad
+            if (x < 0 || y < 0 || x >= w || y >= h || target[y * w + x]) 0f else inf
+        }
+        val len = max(pw, ph)
+        val f = FloatArray(len)
+        val d = FloatArray(len)
+        val v = IntArray(len)
+        val z = FloatArray(len + 1)
+        fun pass(n: Int) {
+            fun meet(q: Int, p: Int) = ((f[q] + q.toFloat() * q) - (f[p] + p.toFloat() * p)) / (2f * (q - p))
+            var k = 0
+            v[0] = 0
+            z[0] = -inf
+            z[1] = inf
+            for (q in 1 until n) {
+                var s = meet(q, v[k])
+                while (s <= z[k]) {
+                    k--
+                    s = meet(q, v[k])
+                }
+                k++
+                v[k] = q
+                z[k] = s
+                z[k + 1] = inf
+            }
+            k = 0
+            for (q in 0 until n) {
+                while (z[k + 1] < q) k++
+                val dq = (q - v[k]).toFloat()
+                d[q] = dq * dq + f[v[k]]
+            }
+        }
+        for (x in 0 until pw) {
+            for (y in 0 until ph) f[y] = g[y * pw + x]
+            pass(ph)
+            for (y in 0 until ph) g[y * pw + x] = d[y]
+        }
+        for (y in 0 until ph) {
+            for (x in 0 until pw) f[x] = g[y * pw + x]
+            pass(pw)
+            for (x in 0 until pw) g[y * pw + x] = d[x]
+        }
+        return FloatArray(w * h) { i -> sqrt(g[(i / w + pad) * pw + i % w + pad]) }
+    }
     private const val CURVE_POINTS = 64
 
     private class Cut(val run: IntArray, val ax: Float, val ay: Float, val bx: Float, val by: Float)
@@ -329,13 +651,13 @@ object BubbleCompletion {
         return out
     }
 
-    /** Even-odd scanline fill of the closed polygon [poly] (x,y interleaved), pixel centres. */
+    /** Even-odd scanline fill of the closed polygon [poly] (x,y interleaved, pixel (x,y) centred on the integer point). */
     internal fun fillPolygon(poly: FloatArray, w: Int, h: Int): BooleanArray {
         val out = BooleanArray(w * h)
         val n = poly.size / 2
         val xs = FloatArray(n)
         for (y in 0 until h) {
-            val cy = y + 0.5f
+            val cy = y.toFloat()
             var k = 0
             for (i in 0 until n) {
                 val j = (i + 1) % n
@@ -348,8 +670,8 @@ object BubbleCompletion {
             java.util.Arrays.sort(xs, 0, k)
             var p = 0
             while (p + 1 < k) {
-                val from = ceil(xs[p] - 0.5f).toInt().coerceAtLeast(0)
-                val to = (xs[p + 1] - 0.5f).toInt().coerceAtMost(w - 1)
+                val from = ceil(xs[p]).toInt().coerceAtLeast(0)
+                val to = floor(xs[p + 1]).toInt().coerceAtMost(w - 1)
                 for (x in from..to) out[y * w + x] = true
                 p += 2
             }

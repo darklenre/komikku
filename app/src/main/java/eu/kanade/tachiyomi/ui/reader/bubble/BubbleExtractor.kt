@@ -247,16 +247,25 @@ object BubbleExtractor {
         )
         val boxes = others.map { toCrop(it.rect) }
         val text = bubble.text.map { toCrop(it) }
+        val otherText = others.flatMap { o -> o.text.map { toCrop(it) } }.toMutableList()
         var mask = BooleanArray(px.size) { alpha[it] >= 0.5f }
         var pixels = px
         var done = false
-        // a balloon in the middle of a chain is linked on two sides: up to two passes, one cut each
+        var neck = false
+        // a balloon in the middle of a chain is linked on two sides: up to two passes, one cut each;
+        // the neck is tried first, the mask's own cut is the fallback (not after a neck: the rebuilt
+        // edge then reads as a spurious cut)
         repeat(2) {
-            val r = runCatching { BubbleCompletion.complete(pixels, luma(pixels), mask, w, h, boxes, text) }
+            val r = runCatching {
+                val l = luma(pixels)
+                BubbleCompletion.completeNeck(pixels, l, mask, w, h, text, otherText)?.also { neck = true }
+                    ?: if (neck) null else BubbleCompletion.complete(pixels, l, mask, w, h, boxes, text)
+            }
                 .onFailure { logcat(LogPriority.WARN) { "BubbleExtractor: completion failed: ${it.message}" } }
                 .getOrNull() ?: return@repeat
             mask = r.mask
             pixels = r.pixels
+            r.linked?.let { otherText.remove(it) }
             done = true
         }
         return if (done) mask to pixels else null

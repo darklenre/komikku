@@ -219,6 +219,24 @@ Sul set: 84 nuvolette completate su 425 (Kotlin = prototipo), metriche invariate
 ritaglio +~15 ms. Verificato a vista: "I AM JOÃO!" diventa un ovale chiuso col suo bordo. Limiti: nuvolette tagliate dal bordo
 del crop o da una cornice (non sono tagli tra nuvolette) restano come sono.
 
+**Completamento al collo (adottato, 17 ott, primo tentativo; il metodo sopra resta come ripiego)** —
+`BubbleCompletion.completeNeck` (prototipo `scripts/neck.py`). Caso utente: Absolute Superman #1 p.6, "You're a lifesaver…" /
+"How about a basket…": SAM taglia lungo l'ultima riga di testo, il taglio è spezzato dalle lettere e il metodo sopra non lo
+riconosce → bordo che "segue le lettere". Ora: F = riempimento condiviso (pixel chiari + box di testo) connesso al nostro
+testo; se contiene il testo di una vicina, il **collo** = sui due lati dell'asse tra i due testi, i punti del bordo di F più
+vicini all'asse (bordo del crop e spigoli dei box di testo esclusi); corda A-B, tangenti del contorno → Hermite (tangenti
+0,7·AB, rigonfiamento ritagliato entro la corda). Cambia solo la zona del collo; altrove resta il bordo di SAM/inkSnap.
+Sicurezze, tutte necessarie sul set: AB < 80 % dell'estensione della nuvoletta, inchiostro ai due estremi, SAM deve aver
+tagliato il riempimento vicino al collo (≥ 0,25·AB px di bordo chiaro con chiaro oltre) e la corda deve stare vicino alla
+maschera (mediana distanza ≤ 0,22·AB: esclude nuvolette senza contorno che toccano il margine bianco, Omniscient), crescita
+sull'inchiostro solo entro la corda (oltre A/B il contorno è della vicina), apertura r = max(⌈t⌉+1, 0,08·AB) per i moncherini,
+mai perdere il nostro testo (né ridipingerlo). Dopo un collo riuscito niente ripiego al 2° passaggio (taglio spurio).
+Risultato sul set (56 pp. + la pagina utente): 76 nuvolette completate al collo, ~20 miglioramenti netti (testo tagliato
+recuperato, morsi chiusi), 3-4 difetti minori residui (cuneo "We've got magic", puntino "D-meter's", gobba "HA.");
+rispetto al metodo sopra pari o meglio sulle 58 in comune. Kotlin = prototipo (IoU mediana 1,0, min 0,99; serve la distanza
+euclidea esatta — la chamfer cambiava l'esito dell'apertura — e i centri pixel interi nel riempimento del poligono).
+JVM desktop: mediana 0 ms (uscita anticipata), p90 6 ms, max ~150 ms.
+
 **Tagli tra nuvolette collegate — raddrizzamento (provato, non adottato)** — `scripts/neckcut.py`: sostituire il tratto di bordo che attraversa il
 riempimento con la corda tra i due estremi. Anche con salvaguardie (oltre il taglio deve esserci un'altra nuvoletta rilevata,
 mai tagliare il testo, area modificata ≤ 12 %) il risultato è misto: sistema "I AM JOÃO!" e 2 casi simili, rovina nuvolette dipinte
