@@ -54,6 +54,9 @@ object BubbleDetection {
     @Volatile
     private var panelDetector: TflitePanelDetector? = null
 
+    /** Guards [panelDetector] only: its GPU set-up (~0.5 s) must not hold up callers waiting on [detector]. */
+    private val panelLock = Any()
+
     private val _activeDetections = MutableStateFlow(0)
 
     /** How many page detections are running right now; drives the reader's processing indicator. */
@@ -290,7 +293,7 @@ object BubbleDetection {
     fun releaseDetector() {
         val old = synchronized(this) { detector.also { detector = null } }
         (old as? TfliteBubbleDetector)?.close()
-        synchronized(this) { panelDetector.also { panelDetector = null } }?.close()
+        synchronized(panelLock) { panelDetector.also { panelDetector = null } }?.close()
         // SAM's close waits for an encode in flight: not on the caller's (main) thread
         detectionScope.launch { SamRefiner.close() }
     }
@@ -317,7 +320,7 @@ object BubbleDetection {
 
     /** The panel model, or null when the device can't run it or it failed to load (the heuristic is used then). */
     private fun panelDetectorFor(appContext: Context): TflitePanelDetector? {
-        val d = panelDetector ?: synchronized(this) {
+        val d = panelDetector ?: synchronized(panelLock) {
             panelDetector ?: if (isSupported(appContext)) TflitePanelDetector(appContext).also { panelDetector = it } else null
         }
         return d?.takeIf { it.isAvailable }
