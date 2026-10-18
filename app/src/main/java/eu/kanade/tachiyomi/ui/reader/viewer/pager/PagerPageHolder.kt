@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.ui.reader.viewer.pager
 import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.view.LayoutInflater
 import androidx.annotation.ColorInt
 import androidx.core.view.isVisible
@@ -260,21 +259,8 @@ class PagerPageHolder(
     }
 
     // KMK --> Bubble Zoom
-    /** Decodes [source] (a peek of the final page image) downscaled to at most [DETECTION_MAX_SIDE]. */
-    private fun decodeForDetection(source: BufferedSource): Bitmap? = try {
-        val bytes = source.readByteArray()
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val longSide = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
-        val opts = BitmapFactory.Options().apply {
-            inSampleSize = max(1, longSide / DETECTION_MAX_SIDE)
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
-    } catch (e: Throwable) {
-        logcat(LogPriority.WARN, e) { "Bubble detection decode failed" }
-        null
-    }
+    /** Decodes [source] (a peek of the final page image) for bubble detection. */
+    private fun decodeForDetection(source: BufferedSource): Bitmap? = BubbleDetection.decodeForDetection(source)
     // KMK <--
 
     private fun process(page: ReaderPage, imageSource: BufferedSource): BufferedSource {
@@ -528,6 +514,3 @@ class PagerPageHolder(
         errorLayout = null
     }
 }
-
-// KMK: longest side (px) the page is downscaled to before running bubble detection
-private const val DETECTION_MAX_SIDE = 1024

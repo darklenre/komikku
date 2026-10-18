@@ -3,12 +3,15 @@ package eu.kanade.tachiyomi.ui.reader.bubble
 import android.app.ActivityManager
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.RectF
 import android.os.Build
 import android.os.PowerManager
 import android.os.Process
 import android.util.LruCache
 import androidx.core.content.getSystemService
+import eu.kanade.tachiyomi.ui.reader.model.InsertPage
+import eu.kanade.tachiyomi.ui.reader.model.ReaderPage
 import eu.kanade.tachiyomi.ui.reader.setting.ReaderPreferences
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -20,6 +23,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import logcat.LogPriority
+import okio.Buffer
+import okio.BufferedSource
+import tachiyomi.core.common.util.system.ImageUtil
+import tachiyomi.core.common.util.system.logcat
 import uy.kohesive.injekt.Injekt
 import uy.kohesive.injekt.api.get
 import java.io.InputStream
@@ -35,7 +43,11 @@ import kotlin.math.roundToInt
  */
 object BubbleDetection {
 
-    private const val CACHE_SIZE = 32
+    /** Pages kept: a whole chapter or two, so [analyzeAhead] results aren't evicted before they're read. */
+    private const val CACHE_SIZE = 256
+
+    /** Longest side (px) the page is downscaled to before detection. */
+    private const val DETECTION_MAX_SIDE = 1024
 
     /**
      * Devices below this total RAM don't run the model (OOM / too slow). `isLowRamDevice` already
@@ -116,11 +128,14 @@ object BubbleDetection {
         }
     }
 
-    /** Detects balloons (and their text blocks) on [bitmap] (the final page image), caching under [key]. */
-    suspend fun detect(context: Context, key: String, bitmap: Bitmap): List<Bubble> {
+    /**
+     * Detects balloons (and their text blocks) on [bitmap] (the final page image), caching under [key].
+     * [foreground] detections drive the reader's processing indicator; [analyzeAhead]'s don't.
+     */
+    suspend fun detect(context: Context, key: String, bitmap: Bitmap, foreground: Boolean = true): List<Bubble> {
         cache.get(key)?.let { return it }
         val confThreshold = confidenceThreshold()
-        _activeDetections.update { it + 1 }
+        if (foreground) _activeDetections.update { it + 1 }
         try {
             val result = detectorFor(context.applicationContext)
                 .takeIf { it.isAvailable }
@@ -132,7 +147,72 @@ object BubbleDetection {
             cache.put(key, result)
             return result
         } finally {
-            _activeDetections.update { it - 1 }
+            if (foreground) _activeDetections.update { it - 1 }
+        }
+    }
+
+    /** Decodes a page image downscaled so its long side is about [DETECTION_MAX_SIDE], or null if it can't. */
+    fun decodeForDetection(source: BufferedSource): Bitmap? = try {
+        val bytes = source.readByteArray()
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val longSide = max(bounds.outWidth, bounds.outHeight).coerceAtLeast(1)
+        val opts = BitmapFactory.Options().apply {
+            inSampleSize = max(1, longSide / DETECTION_MAX_SIDE)
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+    } catch (e: Throwable) {
+        logcat(LogPriority.WARN, e) { "Bubble detection decode failed" }
+        null
+    }
+
+    private var aheadJob: Job? = null
+    private var aheadChapterId: Long? = null
+
+    /**
+     * Chapter pre-analysis: detects, one page after the other in the background, the pages of [pages]' chapter
+     * that are already loaded and not detected yet — the ones after [fromIndex] first, then the ones before —
+     * so a long-tap finds its result ready instead of waiting for the page's own detection.
+     *
+     * Only for viewers that show each page image as loaded (no split / merge / rotation): detection must run on
+     * the final page image, which is what the page holders hand to [enqueue]. One job per chapter: a call for
+     * the chapter already being analysed is a no-op, another chapter replaces it. Stops when the device is
+     * saving power or throttling; [releaseDetector] cancels it. Pages loaded later (online chapters) are picked
+     * up by the next call, made on every page change.
+     */
+    fun analyzeAhead(context: Context, pages: List<ReaderPage>, fromIndex: Int) {
+        val appContext = context.applicationContext
+        val chapterId = pages.firstOrNull()?.chapter?.chapter?.id ?: return
+        synchronized(this) {
+            if (aheadJob?.isActive == true && aheadChapterId == chapterId) return
+            aheadJob?.cancel()
+            aheadChapterId = chapterId
+            aheadJob = detectionScope.launch {
+                if (!isSupported(appContext) || !detectorFor(appContext).isAvailable) return@launch
+                val order = pages.drop(fromIndex + 1) + pages.take(fromIndex).asReversed()
+                var done = 0
+                for (page in order) {
+                    if (deviceUnderStress(appContext)) break
+                    if (page is InsertPage) continue
+                    val key = bubbleKeyFor(page)
+                    if (cache.get(key) != null) continue
+                    val stream = page.stream ?: continue
+                    val bitmap = runCatching {
+                        stream().use { input ->
+                            val source = Buffer().readFrom(input)
+                            if (ImageUtil.isAnimatedAndSupported(source)) null else decodeForDetection(source)
+                        }
+                    }.getOrNull() ?: continue
+                    try {
+                        detect(appContext, key, bitmap, foreground = false)
+                        done++
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+                if (done > 0) logcat(LogPriority.INFO) { "BubbleDetection: analysed $done pages ahead" }
+            }
         }
     }
 
@@ -291,6 +371,7 @@ object BubbleDetection {
      * and let a re-opened page skip re-detection. The detector re-initialises lazily on next use.
      */
     fun releaseDetector() {
+        synchronized(this) { aheadJob?.cancel() }
         val old = synchronized(this) { detector.also { detector = null } }
         (old as? TfliteBubbleDetector)?.close()
         synchronized(panelLock) { panelDetector.also { panelDetector = null } }?.close()

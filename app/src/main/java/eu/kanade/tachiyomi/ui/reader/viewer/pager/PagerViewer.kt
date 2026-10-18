@@ -403,6 +403,13 @@ abstract class PagerViewer(
             return
         }
 
+        // KMK --> Bubble Zoom: detect the rest of the chapter in the background, where the page image is shown
+        // as loaded (no dual-page split, rotation or double pages: detection must see the final image)
+        if (config.bubbleZoomEnabled && !config.dualPageSplit && !config.dualPageRotateToFit && !config.doublePages) {
+            BubbleDetection.analyzeAhead(activity, pages, page.index)
+        }
+        // KMK <--
+
         // Preload next chapter once we're within the last 5 pages of the current chapter
         val inPreloadRange = pages.size - page.number < 5
         if (inPreloadRange && allowPreload && page.chapter == adapter.currentChapter) {
