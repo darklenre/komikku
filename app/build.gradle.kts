@@ -22,6 +22,12 @@ if (Config.includeTelemetry) {
 
 shortcutHelper.setFilePath("./shortcuts.xml")
 
+// KMK -->
+// Bubble Zoom NPU: every build type but FOSS bundles the Qualcomm NPU runtime (QTI AI Stack licence, not FOSS) and
+// the ahead-of-time compiled models in src/npu/assets (Snapdragon 8 Elite Gen 5 / SM8850 only, for now).
+val npuBuildTypes = listOf("debug", "release", "releaseTest", "preview", "benchmark")
+// KMK <--
+
 android {
     namespace = "eu.kanade.tachiyomi"
 
@@ -102,6 +108,9 @@ android {
     sourceSets {
         getByName("preview").res.srcDirs("src/beta/res")
         getByName("benchmark").res.srcDirs("src/debug/res")
+        // KMK -->
+        npuBuildTypes.forEach { getByName(it).assets.srcDirs("src/npu/assets") }
+        // KMK <--
     }
 
     splits {
@@ -317,9 +326,11 @@ dependencies {
         exclude(group = "com.google.android.play", module = "ai-delivery")
     }
     implementation(libs.litert.gpu)
-    // Bubble Zoom NPU experiment (debug only): LiteRT's Qualcomm dispatch library + the QNN runtime it loads
-    debugImplementation(libs.litert.npu.qualcomm)
-    debugImplementation(libs.qnn.runtime)
+    // Bubble Zoom NPU (not FOSS, see npuBuildTypes): LiteRT's Qualcomm dispatch library + the QNN runtime it loads
+    npuBuildTypes.forEach {
+        add("${it}Implementation", libs.litert.npu.qualcomm)
+        add("${it}Implementation", libs.qnn.runtime)
+    }
     implementation(libs.haze)
     implementation(compose.colorpicker)
     implementation(projects.flagkit)
@@ -367,17 +378,19 @@ androidComponents {
         it.packaging.resources.excludes.add("META-INF/*.version")
     }
     // KMK -->
-    onVariants(selector().withBuildType("debug")) {
+    onVariants(selector().all()) {
+        if (it.buildType !in npuBuildTypes) return@onVariants
         // Bubble Zoom NPU: the Hexagon skel libraries are loaded from the extracted native library dir, and
-        // ahead-of-time compiled models need neither the on-device compiler nor the GPU/DSP/old-HTP backends.
+        // ahead-of-time compiled models need neither the on-device compiler nor the GPU/DSP backends. Only the
+        // HTP generation the bundled models are compiled for (v81, SM8850) is kept.
         it.packaging.jniLibs.useLegacyPackaging.set(true)
         it.packaging.jniLibs.excludes.addAll(
             listOf(
                 "**/libQnnHtpPrepare.so",
                 "**/libQnnGpu.so",
                 "**/libQnnDsp*.so",
-                "**/libQnnHtpV68*.so",
-                "**/libQnnHtpV69*.so",
+                "**/libQnnHtpV6*.so",
+                "**/libQnnHtpV7*.so",
                 "**/libLiteRtCompilerPlugin_Qualcomm.so",
             ),
         )

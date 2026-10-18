@@ -60,7 +60,7 @@ internal class LiteRtModel private constructor(
 
     /** Where to run a model. GPU backends keep the CPU as fallback for the ops the GPU can't run. */
     enum class Backend(val label: String) {
-        /** Qualcomm NPU; only for models compiled ahead of time for this SoC ([npuAsset]). */
+        /** Qualcomm NPU; only for models compiled ahead of time for this SoC ([npuSource]). */
         NPU("npu"),
         GPU("gpu"),
 
@@ -95,16 +95,32 @@ internal class LiteRtModel private constructor(
         }
 
         /**
-         * The ahead-of-time compiled NPU variant of `models/<name>.tflite` for this device's SoC
-         * (`models/npu/<soc>/<name>.tflite`), or null when there is none.
+         * SHA-256 of the bundled NPU assets (`src/npu/assets`, every build type but FOSS): ahead-of-time compiled
+         * models per SoC, plus the CPU half that goes with the split balloon detector.
          */
-        fun npuAsset(context: Context, name: String): String? {
+        private val NPU_SHA = mapOf(
+            "models/npu/sm8850/panel_detector_v2.tflite" to
+                "c3cbf3dba018e2264ce89436afac7abd8421b4cffb3ca82d7a3819401be30e3c",
+            "models/npu/sm8850/bubble_detector_v4s_head.tflite" to
+                "2e7d55a4fb550685eff28775b409c6ef00fca36e687f35ef1b2ce8c5ef089fb9",
+            "models/npu/bubble_detector_v4s_tail.tflite" to
+                "02670ae6a837d69a8914c4a6fcdd6a31003df34fc252fbea438a036137595350",
+        )
+
+        /**
+         * The ahead-of-time compiled NPU variant of `<name>` for this device's SoC
+         * (`models/npu/<soc>/<name>.tflite`) on [Backend.NPU], or null when this build or SoC has none.
+         */
+        fun npuSource(context: Context, name: String): Source? {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-            val soc = Build.SOC_MODEL.lowercase()
-            val dir = "models/npu/$soc"
+            val dir = "models/npu/${Build.SOC_MODEL.lowercase()}"
             val files = runCatching { context.assets.list(dir) }.getOrNull() ?: return null
-            return "$dir/$name.tflite".takeIf { "$name.tflite" in files }
+            if ("$name.tflite" !in files) return null
+            return bundledNpuSource("$dir/$name.tflite", Backend.NPU)
         }
+
+        /** A bundled NPU asset on [backend], or null when this build doesn't bundle it. */
+        fun bundledNpuSource(asset: String, backend: Backend): Source? = NPU_SHA[asset]?.let { Source(asset, it, backend) }
 
         /** Compiles [asset] on the first of [backends] that accepts it. */
         fun open(context: Context, asset: String, sha: String, io: Io?, vararg backends: Backend): LiteRtModel =

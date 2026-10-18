@@ -1,0 +1,32 @@
+Bubble Zoom NPU models
+======================
+
+Bundled in every build type except FOSS. They are alternative forms of the models described in
+models/NOTICE, for Qualcomm NPUs (Hexagon HTP), and are redistributed under the same licence as their
+source (Apache License 2.0, see models/LICENSE).
+
+--------------------------------------------------------------------------------
+Ahead-of-time compiled models, per SoC (models/npu/<soc>/)
+--------------------------------------------------------------------------------
+  sm8850/panel_detector_v2.tflite
+      panel_detector_v2 (models/NOTICE, section 3), compiled for the Snapdragon 8 Elite Gen 5
+      (SM8850) NPU with LiteRT 2.3.0's Qualcomm compiler plugin (QAIRT 2.50), fp16.
+
+  sm8850/bubble_detector_v4s_head.tflite
+      Backbone and hybrid encoder of detector-v4-s (models/NOTICE, section 1), up to the flattened
+      encoder memory [1,8400,256], compiled for SM8850 like the above, fp16. Converted from the
+      upstream ONNX as in models/NOTICE, with GridSample rewritten as explicit bilinear Gathers
+      (same maths), then the TFLite graph cut at the encoder memory.
+
+--------------------------------------------------------------------------------
+CPU half of the split balloon detector
+--------------------------------------------------------------------------------
+  bubble_detector_v4s_tail.tflite
+      Query selection and DETR decoder of detector-v4-s, from the encoder memory to labels, boxes
+      and scores; the rest of the graph above. TFLite, dynamic-range int8 weights.
+
+No trained weights were changed beyond format conversion / precision for on-device inference.
+
+The Qualcomm runtime that executes the compiled models (libQnn*.so, from Maven Central
+com.qualcomm.qti:qnn-runtime) is proprietary Qualcomm software under the Qualcomm AI Stack licence,
+distributed in object code as part of this application only.

@@ -22,7 +22,7 @@ import kotlin.math.roundToInt
  * NMS ([NMS_IOU]).
  *
  * Same threading and backend policy as [TfliteBubbleDetector]: one background thread; the NPU when an
- * ahead-of-time compiled variant exists for this SoC ([LiteRtModel.npuAsset]), else the CPU (~17 ms).
+ * ahead-of-time compiled variant exists for this SoC ([LiteRtModel.npuSource]), else the CPU (~17 ms).
  */
 class TflitePanelDetector(context: Context) {
 
@@ -40,7 +40,7 @@ class TflitePanelDetector(context: Context) {
     init {
         try {
             val sources = listOfNotNull(
-                LiteRtModel.npuAsset(context, NPU_NAME)?.let { LiteRtModel.Source(it, null, LiteRtModel.Backend.NPU) },
+                LiteRtModel.npuSource(context, NPU_NAME),
                 LiteRtModel.Source(ASSET, ASSET_SHA, LiteRtModel.Backend.CPU),
             )
             model = LiteRtModel.open(context, null, *sources.toTypedArray())

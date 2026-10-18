@@ -65,11 +65,12 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
     }
 
     private fun openNpuSplit(context: Context) {
-        val headAsset = LiteRtModel.npuAsset(context, NPU_HEAD) ?: return
+        val headSource = LiteRtModel.npuSource(context, NPU_HEAD) ?: return
+        val tailSource = LiteRtModel.bundledNpuSource(NPU_TAIL_ASSET, LiteRtModel.Backend.CPU) ?: return
         runCatching {
-            val h = LiteRtModel.open(context, null, LiteRtModel.Source(headAsset, null, LiteRtModel.Backend.NPU))
+            val h = LiteRtModel.open(context, null, headSource)
             tail = try {
-                LiteRtModel.open(context, null, LiteRtModel.Source(NPU_TAIL_ASSET, null, LiteRtModel.Backend.CPU))
+                LiteRtModel.open(context, null, tailSource)
             } catch (t: Throwable) {
                 h.close()
                 throw t
@@ -186,7 +187,7 @@ class TfliteBubbleDetector(context: Context) : BubbleDetector {
         const val OUT_BOXES = 1
         const val OUT_SCORES = 2
 
-        /** NPU variant of the encoder half, see [LiteRtModel.npuAsset]. */
+        /** NPU variant of the encoder half, see [LiteRtModel.npuSource]. */
         const val NPU_HEAD = "bubble_detector_v4s_head"
 
         /** Decoder half (CPU, any SoC); its outputs, without a signature, are boxes, labels, scores. */
