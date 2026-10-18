@@ -16,14 +16,18 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
   RT-DETR-v2 detector (classes: bubble, text_bubble, text_free) trained on
   manga, webtoon, manhua and western comic pages.
 
-  Bundled artifact:
-    bubble_detector_v4s.tflite
+  Bundled artifacts (one model, cut in two at the flattened encoder memory
+  [1,8400,256] so the first half can run on an NPU):
+    bubble_detector_v4s_head.tflite   backbone + hybrid encoder, fp16 weights.
+    bubble_detector_v4s_tail.tflite   query selection + DETR decoder,
+                                      dynamic-range int8 weights.
       Converted from upstream detector-v4-s_int8.onnx: weights de-quantized to
       fp32, batch fixed to 1, output boxes normalised (orig_target_sizes folded
       to 1), a no-op floor-division sign fix-up in the post-processing removed,
-      converted to a SavedModel with onnx2tf (Erf replaced by a builtin
-      approximation), then to TFLite with the TensorFlow 2.16 converter (op
-      versions matching the bundled runtime) and dynamic-range int8 weights.
+      GridSample rewritten as explicit bilinear Gathers (same maths), converted
+      to a SavedModel with onnx2tf (Erf replaced by a builtin approximation),
+      then to TFLite with the TensorFlow 2.16 converter (op versions matching
+      the bundled runtime), and the TFLite graph cut in two.
 
 --------------------------------------------------------------------------------
 2. Cutout refinement (SAM)

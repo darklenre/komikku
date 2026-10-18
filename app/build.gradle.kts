@@ -23,8 +23,9 @@ if (Config.includeTelemetry) {
 shortcutHelper.setFilePath("./shortcuts.xml")
 
 // KMK -->
-// Bubble Zoom NPU: every build type but FOSS bundles the Qualcomm NPU runtime (QTI AI Stack licence, not FOSS) and
-// the ahead-of-time compiled models in src/npu/assets (Snapdragon 8 Elite Gen 5 / SM8850 only, for now).
+// Bubble Zoom NPU: every build type but FOSS bundles the Qualcomm NPU runtime and on-device compiler (QTI AI Stack
+// licence, not FOSS) and the ahead-of-time compiled models in src/npu/assets (SM8850 only; other Snapdragons with a
+// Hexagon NPU compile the plain models on the device once).
 val npuBuildTypes = listOf("debug", "release", "releaseTest", "preview", "benchmark")
 // KMK <--
 
@@ -380,20 +381,10 @@ androidComponents {
     // KMK -->
     onVariants(selector().all()) {
         if (it.buildType !in npuBuildTypes) return@onVariants
-        // Bubble Zoom NPU: the Hexagon skel libraries are loaded from the extracted native library dir, and
-        // ahead-of-time compiled models need neither the on-device compiler nor the GPU/DSP backends. Only the
-        // HTP generation the bundled models are compiled for (v81, SM8850) is kept.
+        // Bubble Zoom NPU: the Hexagon skel libraries are loaded from the extracted native library dir. Only the
+        // HTP backend is used (plus its on-device compiler, libQnnHtpPrepare), not the GPU/DSP ones.
         it.packaging.jniLibs.useLegacyPackaging.set(true)
-        it.packaging.jniLibs.excludes.addAll(
-            listOf(
-                "**/libQnnHtpPrepare.so",
-                "**/libQnnGpu.so",
-                "**/libQnnDsp*.so",
-                "**/libQnnHtpV6*.so",
-                "**/libQnnHtpV7*.so",
-                "**/libLiteRtCompilerPlugin_Qualcomm.so",
-            ),
-        )
+        it.packaging.jniLibs.excludes.addAll(listOf("**/libQnnGpu.so", "**/libQnnDsp*.so"))
     }
     // KMK <--
 }

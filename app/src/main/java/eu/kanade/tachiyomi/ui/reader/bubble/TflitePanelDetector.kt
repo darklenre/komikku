@@ -21,8 +21,8 @@ import kotlin.math.roundToInt
  * pixels, objectness, class score. Boxes with `objectness * class` >= [CONF] go through class-agnostic
  * NMS ([NMS_IOU]).
  *
- * Same threading and backend policy as [TfliteBubbleDetector]: one background thread; the NPU when an
- * ahead-of-time compiled variant exists for this SoC ([LiteRtModel.npuSource]), else the CPU (~17 ms).
+ * One background thread, like [TfliteBubbleDetector]; on the NPU when there is one
+ * ([LiteRtModel.npuSources]), else the CPU (~17 ms).
  */
 class TflitePanelDetector(context: Context) {
 
@@ -39,10 +39,8 @@ class TflitePanelDetector(context: Context) {
 
     init {
         try {
-            val sources = listOfNotNull(
-                LiteRtModel.npuSource(context, NPU_NAME),
-                LiteRtModel.Source(ASSET, ASSET_SHA, LiteRtModel.Backend.CPU),
-            )
+            val sources = LiteRtModel.npuSources(context, NPU_NAME, ASSET, ASSET_SHA) +
+                LiteRtModel.Source(ASSET, ASSET_SHA, LiteRtModel.Backend.CPU)
             model = LiteRtModel.open(context, null, *sources.toTypedArray())
             logcat(LogPriority.WARN) { "TflitePanelDetector: ready (backend=${model?.backend})" }
         } catch (t: Throwable) {
@@ -130,7 +128,7 @@ class TflitePanelDetector(context: Context) {
     private companion object {
         const val ASSET = "models/panel_detector_v2.tflite"
 
-        /** Name of the NPU variant of [ASSET] (same input and output). */
+        /** Name of the ahead-of-time compiled NPU variant of [ASSET] (same input and output). */
         const val NPU_NAME = "panel_detector_v2"
 
         /** SHA-256 of [ASSET]; a truncated/corrupt model otherwise SIGABRTs deep in LiteRT. */

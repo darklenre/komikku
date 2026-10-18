@@ -60,8 +60,14 @@ internal class LiteRtModel private constructor(
 
     /** Where to run a model. GPU backends keep the CPU as fallback for the ops the GPU can't run. */
     enum class Backend(val label: String) {
-        /** Qualcomm NPU; only for models compiled ahead of time for this SoC ([npuSource]). */
+        /** Qualcomm NPU, for a model compiled ahead of time for this SoC ([npuSources]). */
         NPU("npu"),
+
+        /**
+         * Qualcomm NPU, compiling a plain model on the device ([npuSources]): slow the first time (a few seconds
+         * per model), then loaded from LiteRT's compilation cache in the app's cache dir.
+         */
+        NPU_JIT("npu-jit"),
         GPU("gpu"),
 
         /** GPU at full fp32 precision, for models whose output drifts in fp16 (EdgeSAM's encoder). */
@@ -95,32 +101,36 @@ internal class LiteRtModel private constructor(
         }
 
         /**
-         * SHA-256 of the bundled NPU assets (`src/npu/assets`, every build type but FOSS): ahead-of-time compiled
-         * models per SoC, plus the CPU half that goes with the split balloon detector.
+         * SHA-256 of the ahead-of-time compiled models (`src/npu/assets/models/npu/<soc>/`, every build type but
+         * FOSS); one is used only if this build bundles it.
          */
         private val NPU_SHA = mapOf(
             "models/npu/sm8850/panel_detector_v2.tflite" to
-                "c3cbf3dba018e2264ce89436afac7abd8421b4cffb3ca82d7a3819401be30e3c",
+                "6189c5140c61ab6f2f0099454063afb65e42ef261513f9f06bb47103759633e5",
             "models/npu/sm8850/bubble_detector_v4s_head.tflite" to
-                "2e7d55a4fb550685eff28775b409c6ef00fca36e687f35ef1b2ce8c5ef089fb9",
-            "models/npu/bubble_detector_v4s_tail.tflite" to
-                "02670ae6a837d69a8914c4a6fcdd6a31003df34fc252fbea438a036137595350",
+                "4883eebdd2dfd415d86c72c89893a4aabf4d4bbe041f75757f04d45cf8ac4d35",
         )
 
-        /**
-         * The ahead-of-time compiled NPU variant of `<name>` for this device's SoC
-         * (`models/npu/<soc>/<name>.tflite`) on [Backend.NPU], or null when this build or SoC has none.
-         */
-        fun npuSource(context: Context, name: String): Source? {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
-            val dir = "models/npu/${Build.SOC_MODEL.lowercase()}"
-            val files = runCatching { context.assets.list(dir) }.getOrNull() ?: return null
-            if ("$name.tflite" !in files) return null
-            return bundledNpuSource("$dir/$name.tflite", Backend.NPU)
-        }
+        /** True when this build bundles the NPU runtime and the device's NPU is supported by it. */
+        private fun npuAvailable(context: Context): Boolean =
+            runCatching { Accelerator.NPU in environment(context).getAvailableAccelerators() }.getOrDefault(false)
 
-        /** A bundled NPU asset on [backend], or null when this build doesn't bundle it. */
-        fun bundledNpuSource(asset: String, backend: Backend): Source? = NPU_SHA[asset]?.let { Source(asset, it, backend) }
+        /**
+         * The NPU ways to run the model `<name>` (bundled as [asset]): its ahead-of-time compiled variant for
+         * this device's SoC (`models/npu/<soc>/<name>.tflite`) when the build has one, then [asset] compiled on
+         * the device. Empty without an NPU.
+         */
+        fun npuSources(context: Context, name: String, asset: String, sha: String): List<Source> {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !npuAvailable(context)) return emptyList()
+            val dir = "models/npu/${Build.SOC_MODEL.lowercase()}"
+            val aot = "$dir/$name.tflite".takeIf { aot ->
+                NPU_SHA.containsKey(aot) && runCatching { context.assets.list(dir) }.getOrNull()?.contains("$name.tflite") == true
+            }
+            return listOfNotNull(
+                aot?.let { Source(it, NPU_SHA.getValue(it), Backend.NPU) },
+                Source(asset, sha, Backend.NPU_JIT),
+            )
+        }
 
         /** Compiles [asset] on the first of [backends] that accepts it. */
         fun open(context: Context, asset: String, sha: String, io: Io?, vararg backends: Backend): LiteRtModel =
@@ -160,8 +170,8 @@ internal class LiteRtModel private constructor(
         }
 
         /**
-         * Debug builds only: `files/bzeval/backends` (lines `npu=off`, `gpu=off|fp32`) narrows the backends,
-         * so the eval harness can compare them on one install.
+         * Debug builds only: `files/bzeval/backends` (lines `npu=off`, `aot=off`, `jit=off`, `gpu=off|fp32`)
+         * narrows the backends, so the eval harness can compare them on one install.
          */
         private fun debugOverride(context: Context, sources: List<Source>): List<Source> {
             if (!BuildConfig.DEBUG) return sources
@@ -172,7 +182,9 @@ internal class LiteRtModel private constructor(
                 ?: return sources
             return sources.mapNotNull { s ->
                 when {
-                    s.backend == Backend.NPU && flags["npu"] == "off" -> null
+                    s.backend in setOf(Backend.NPU, Backend.NPU_JIT) && flags["npu"] == "off" -> null
+                    s.backend == Backend.NPU && flags["aot"] == "off" -> null
+                    s.backend == Backend.NPU_JIT && flags["jit"] == "off" -> null
                     s.backend == Backend.GPU && flags["gpu"] == "off" -> null
                     s.backend == Backend.GPU && flags["gpu"] == "fp32" -> Source(s.asset, s.sha, Backend.GPU_FP32)
                     else -> s
@@ -182,7 +194,7 @@ internal class LiteRtModel private constructor(
 
         private fun options(backend: Backend): CompiledModel.Options {
             val options = when (backend) {
-                Backend.NPU -> CompiledModel.Options(Accelerator.NPU)
+                Backend.NPU, Backend.NPU_JIT -> CompiledModel.Options(Accelerator.NPU)
                 Backend.GPU, Backend.GPU_FP32 -> CompiledModel.Options(Accelerator.GPU, Accelerator.CPU)
                 Backend.CPU -> CompiledModel.Options(Accelerator.CPU)
             }
