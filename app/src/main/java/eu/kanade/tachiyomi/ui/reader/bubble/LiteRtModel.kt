@@ -109,6 +109,8 @@ internal class LiteRtModel private constructor(
                 "6189c5140c61ab6f2f0099454063afb65e42ef261513f9f06bb47103759633e5",
             "models/npu/sm8850/bubble_detector_v4s_head.tflite" to
                 "4883eebdd2dfd415d86c72c89893a4aabf4d4bbe041f75757f04d45cf8ac4d35",
+            "models/npu/sm8850/sam_encoder_edgesam_v2.tflite" to
+                "b2d6e8da7b21e156bdedf30318d58a52c10498847c8f884f8869e142b6a8aae8",
         )
 
         /** True when this build bundles the NPU runtime and the device's NPU is supported by it. */
@@ -117,10 +119,10 @@ internal class LiteRtModel private constructor(
 
         /**
          * The NPU ways to run the model `<name>` (bundled as [asset]): its ahead-of-time compiled variant for
-         * this device's SoC (`models/npu/<soc>/<name>.tflite`) when the build has one, then [asset] compiled on
-         * the device. Empty without an NPU.
+         * this device's SoC (`models/npu/<soc>/<name>.tflite`) when the build has one, then, if [jit], [asset]
+         * compiled on the device. Empty without an NPU.
          */
-        fun npuSources(context: Context, name: String, asset: String, sha: String): List<Source> {
+        fun npuSources(context: Context, name: String, asset: String, sha: String, jit: Boolean = true): List<Source> {
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || !npuAvailable(context)) return emptyList()
             val dir = "models/npu/${Build.SOC_MODEL.lowercase()}"
             val aot = "$dir/$name.tflite".takeIf { aot ->
@@ -128,7 +130,7 @@ internal class LiteRtModel private constructor(
             }
             return listOfNotNull(
                 aot?.let { Source(it, NPU_SHA.getValue(it), Backend.NPU) },
-                Source(asset, sha, Backend.NPU_JIT),
+                Source(asset, sha, Backend.NPU_JIT).takeIf { jit },
             )
         }
 
@@ -152,7 +154,7 @@ internal class LiteRtModel private constructor(
                     val model = CompiledModel.create(
                         context.assets,
                         source.asset,
-                        options(source.backend),
+                        options(source.backend, debugFlags(context, source.asset)?.get("htp")),
                         environment(context),
                     )
                     return try {
@@ -170,35 +172,52 @@ internal class LiteRtModel private constructor(
         }
 
         /**
-         * Debug builds only: `files/bzeval/backends` (lines `npu=off`, `aot=off`, `jit=off`, `gpu=off|fp32`)
-         * narrows the backends, so the eval harness can compare them on one install.
+         * Debug builds only: `files/bzeval/backends` (lines `npu=off`, `aot=off`, `jit=off`, `gpu=off|fp32`, each
+         * optionally scoped to the assets whose path contains a word, e.g. `sam_encoder:npu=off`) narrows the
+         * backends, so the eval harness can compare them on one install. `htp=<mode>` sets the NPU's
+         * [CompiledModel.QualcommOptions.HtpPerformanceMode] (e.g. `htp=burst`).
          */
         private fun debugOverride(context: Context, sources: List<Source>): List<Source> {
-            if (!BuildConfig.DEBUG) return sources
-            val file = File(context.filesDir, "bzeval/backends")
-            val flags = runCatching { file.readLines() }.getOrNull()
-                ?.mapNotNull { line -> line.split('=').takeIf { it.size == 2 }?.let { it[0].trim() to it[1].trim() } }
-                ?.toMap()
-                ?: return sources
+            val asset = sources.firstOrNull()?.asset ?: return sources
+            val all = debugFlags(context, asset) ?: return sources
+            logcat(LogPriority.WARN) { "LiteRtModel: debug backends for $asset: $all" }
             return sources.mapNotNull { s ->
+                val flags = debugFlags(context, s.asset).orEmpty()
                 when {
                     s.backend in setOf(Backend.NPU, Backend.NPU_JIT) && flags["npu"] == "off" -> null
                     s.backend == Backend.NPU && flags["aot"] == "off" -> null
                     s.backend == Backend.NPU_JIT && flags["jit"] == "off" -> null
-                    s.backend == Backend.GPU && flags["gpu"] == "off" -> null
+                    s.backend in setOf(Backend.GPU, Backend.GPU_FP32) && flags["gpu"] == "off" -> null
                     s.backend == Backend.GPU && flags["gpu"] == "fp32" -> Source(s.asset, s.sha, Backend.GPU_FP32)
                     else -> s
                 }
-            }.also { logcat(LogPriority.WARN) { "LiteRtModel: debug backends $flags" } }
+            }
         }
 
-        private fun options(backend: Backend): CompiledModel.Options {
+        /** The debug flags of `files/bzeval/backends` that apply to [asset]; null when there are none. */
+        private fun debugFlags(context: Context, asset: String): Map<String, String>? {
+            if (!BuildConfig.DEBUG) return null
+            val lines = runCatching { File(context.filesDir, "bzeval/backends").readLines() }.getOrNull()
+                ?.mapNotNull { line -> line.split('=').takeIf { it.size == 2 } }
+                ?: return null
+            return lines.mapNotNull { (key, value) ->
+                val scope = key.substringBefore(':', "").trim()
+                if (scope.isEmpty() || scope in asset) key.substringAfter(':').trim() to value.trim() else null
+            }.toMap()
+        }
+
+        private fun options(backend: Backend, htpMode: String? = null): CompiledModel.Options {
             val options = when (backend) {
                 Backend.NPU, Backend.NPU_JIT -> CompiledModel.Options(Accelerator.NPU)
                 Backend.GPU, Backend.GPU_FP32 -> CompiledModel.Options(Accelerator.GPU, Accelerator.CPU)
                 Backend.CPU -> CompiledModel.Options(Accelerator.CPU)
             }
             options.cpuOptions = CompiledModel.CpuOptions(CPU_THREADS, null, null)
+            if (htpMode != null && backend in setOf(Backend.NPU, Backend.NPU_JIT)) {
+                options.qualcommOptions = CompiledModel.QualcommOptions(
+                    htpPerformanceMode = CompiledModel.QualcommOptions.HtpPerformanceMode.valueOf(htpMode.uppercase()),
+                )
+            }
             if (backend == Backend.GPU_FP32) {
                 options.gpuOptions = CompiledModel.GpuOptions(precision = CompiledModel.GpuOptions.Precision.FP32)
             }

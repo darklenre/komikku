@@ -38,7 +38,14 @@ feature. All are redistributed under the Apache License 2.0 (see LICENSE).
   Licence:  Apache License 2.0
 
   Bundled artifacts:
-    sam_encoder_edgesam.tflite   RepViT image encoder, fp32 TFLite export.
+    sam_encoder_edgesam_v2.tflite
+      RepViT image encoder (edge_sam_3x ONNX export), input NHWC, output
+      embedding [1,256,64,64], fp16 weights. Made to run in fp16 (NPU):
+      constant scales folded into the convolutions feeding the neck
+      LayerNorms and into the squeeze-excitation means (1/1024, 1/64; exact
+      in fp32), Erf replaced by the tanh approximation of GELU on clipped
+      input (max error 3.6e-4), converted with onnx2tf and the TensorFlow
+      converter.
     sam_decoder_edgesam.tflite   box-prompted mask decoder, fp32 TFLite export.
 
 --------------------------------------------------------------------------------

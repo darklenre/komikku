@@ -50,10 +50,12 @@ class BubbleEvalActivity : Activity() {
         }
         // External files dir (emulator); on devices where adb-pushed files there aren't visible to the
         // app, push to /data/local/tmp and `run-as` copy them into the internal files dir instead.
+        // Extra "set": another page folder next to "pages" (e.g. a larger unlabelled set), written to "out_<set>".
+        val set = intent.getStringExtra("set") ?: "pages"
         val root = listOf(File(getExternalFilesDir(null), "bzeval"), File(filesDir, "bzeval"))
-            .firstOrNull { !File(it, "pages").listFiles().isNullOrEmpty() } ?: File(getExternalFilesDir(null), "bzeval")
-        val out = File(root, "out").apply { mkdirs() }
-        val pages = File(root, "pages").listFiles()?.sortedBy { it.name }.orEmpty()
+            .firstOrNull { !File(it, set).listFiles().isNullOrEmpty() } ?: File(getExternalFilesDir(null), "bzeval")
+        val out = File(root, if (set == "pages") "out" else "out_$set").apply { mkdirs() }
+        val pages = File(root, set).listFiles()?.sortedBy { it.name }.orEmpty()
         scope.launch {
             BubbleDetection.clearCache()
             for ((i, f) in pages.withIndex()) {

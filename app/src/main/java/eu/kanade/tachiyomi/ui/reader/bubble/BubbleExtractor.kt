@@ -72,7 +72,7 @@ object BubbleExtractor {
 
     /**
      * Computes and caches the masks of [bubbles] on page [pageKey] ahead of the user, checking
-     * [stillWanted] between balloons. Only when the SAM encoder runs on the GPU: on CPU a page of
+     * [stillWanted] between balloons. Only when the SAM encoder runs on the NPU or the GPU: on CPU a page of
      * balloons costs seconds, so there the cutout is computed on demand instead.
      */
     fun prewarm(

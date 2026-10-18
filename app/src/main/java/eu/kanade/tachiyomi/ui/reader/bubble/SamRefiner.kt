@@ -15,9 +15,12 @@ import kotlin.math.roundToInt
 
 /**
  * EdgeSAM box-prompted balloon segmentation (EdgeSAM is Apache-2.0), backed by two LiteRT models:
- *  - `models/sam_encoder_edgesam.tflite`: `[1,3,1024,1024]` NCHW f32 -> image embedding `[1,256,64,64]`.
- *    RepViT backbone (pure convolution), so LiteRT's GPU accelerator runs the whole encode in hardware
- *    (~50 ms) instead of the CPU (~350 ms / ~2 s).
+ *  - `models/sam_encoder_edgesam_v2.tflite`: `[1,1024,1024,3]` NHWC f32 -> image embedding `[1,256,64,64]`
+ *    (fp16 weights; rescaled so no activation overflows fp16, see `assets/models/NOTICE`). RepViT backbone
+ *    (pure convolution): on the NPU when this build has it compiled ahead of time for the device's SoC
+ *    (~115 ms on the Fold8, steady), else on the GPU at fp32 (~70-120 ms, slower when hot), else the CPU
+ *    (~350 ms / ~2 s). Not compiled for the NPU on the device: that takes ~40 s for this model and would hold
+ *    up the first cutout, for no measured gain over the GPU.
  *  - `models/sam_decoder_edgesam.tflite`: (embedding, box `[1,4]` px in the 1024 frame) -> mask logits
  *    `[1,1,256,256]` + IoU `[1,1]`
  *
@@ -28,12 +31,15 @@ import kotlin.math.roundToInt
  */
 object SamRefiner {
 
-    private const val ENCODER_ASSET = "models/sam_encoder_edgesam.tflite"
+    private const val ENCODER_ASSET = "models/sam_encoder_edgesam_v2.tflite"
     private const val DECODER_ASSET = "models/sam_decoder_edgesam.tflite"
 
     /** SHA-256 of the bundled assets — a truncated/corrupt model otherwise SIGABRTs deep in LiteRT. */
-    private const val ENCODER_SHA = "564f55425f04e5f5c8c7853fc3df8ca108a002b6de0deae328519fe02e03c23f"
+    private const val ENCODER_SHA = "3868264ebcb3ea81e93df6ffeecf47f2260ea30a51ef3920b84e781eafcce568"
     private const val DECODER_SHA = "8bbb8aafbbe447ca67b7235e115d6bdf5360afae27b5a43425c3d204d885807c"
+
+    /** Name of the ahead-of-time compiled NPU variant of [ENCODER_ASSET], see [LiteRtModel.npuSources]. */
+    private const val ENCODER_NAME = "sam_encoder_edgesam_v2"
 
     private const val INPUT = 1024
     private const val EMBED_LEN = 256 * 64 * 64
@@ -65,10 +71,10 @@ object SamRefiner {
     private val encLock = Any()
     private val decLock = Any()
 
-    /** Encoder input layout: the bundled encoder takes NCHW. */
-    private const val ENC_NHWC = false
+    /** Encoder input layout: the bundled encoder takes NHWC. */
+    private const val ENC_NHWC = true
 
-    private val ENCODER_IO = LiteRtModel.Io(listOf("args_0"), listOf("output_0"))
+    private val ENCODER_IO = LiteRtModel.Io(listOf("image"), listOf("embedding"))
 
     /** Decoder signature: inputs `args_0` (embedding), `args_1` (box); outputs mask logits, IoU. */
     private val DECODER_IO = LiteRtModel.Io(listOf("args_0", "args_1"), listOf("output_0", "output_1"))
@@ -109,15 +115,17 @@ object SamRefiner {
             if (triedInit || disabledForSlowDevice) return
             triedInit = true
             runCatching {
-                // Full fp32 on the GPU: with fp16 the balloon edges drift a few px (eval set, Fold8: boundary
-                // F 0.78 vs 0.86 on CPU). EdgeSAM's RepViT encoder is pure convolution, so the GPU takes it whole.
+                // NPU (fp16: the v2 model is rescaled for it; eval set, Fold8: same masks as the GPU at fp32), else
+                // full fp32 on the GPU: the GPU's fp16 drifts the balloon edges a few px (boundary F 0.78 vs 0.86 on
+                // CPU). EdgeSAM's RepViT encoder is pure convolution, so the NPU and the GPU both take it whole.
                 encoder = LiteRtModel.open(
                     context,
-                    ENCODER_ASSET,
-                    ENCODER_SHA,
                     ENCODER_IO,
-                    LiteRtModel.Backend.GPU_FP32,
-                    LiteRtModel.Backend.CPU,
+                    *(
+                        LiteRtModel.npuSources(context, ENCODER_NAME, ENCODER_ASSET, ENCODER_SHA, jit = false) +
+                            LiteRtModel.Source(ENCODER_ASSET, ENCODER_SHA, LiteRtModel.Backend.GPU_FP32) +
+                            LiteRtModel.Source(ENCODER_ASSET, ENCODER_SHA, LiteRtModel.Backend.CPU)
+                        ).toTypedArray(),
                 )
                 // Decoder stays on CPU: it is cheap, and on Adreno (LiteRT 1.4.2) the GPU delegate accepted it
                 // but returned garbage logits, so every mask failed the plausibility check.
@@ -139,8 +147,8 @@ object SamRefiner {
         }
     }
 
-    /** True when the encoder runs on the GPU (cheap enough to precompute a whole page). */
-    val isFast: Boolean get() = encoder?.backend?.startsWith("gpu") == true
+    /** True when the encoder runs on the NPU or the GPU (cheap enough to precompute a whole page). */
+    val isFast: Boolean get() = encoder?.backend.let { it != null && it != LiteRtModel.Backend.CPU.label }
 
     /** Loads the models if needed; false when SAM can't run (missing models, slow device). */
     fun prepare(context: Context): Boolean {
@@ -175,6 +183,7 @@ object SamRefiner {
                 val t0 = System.currentTimeMillis()
                 val e = runEncoder(enc, crop, nw, nh)
                 val dt = System.currentTimeMillis() - t0
+                logcat(LogPriority.DEBUG) { "SamRefiner: encode ${dt}ms on ${enc.backend}" }
                 if (foreground) noteEncodeLatency(dt)
                 e
             } finally {

@@ -17,6 +17,10 @@ Ahead-of-time compiled models, per SoC (models/npu/<soc>/)
       encoder memory [1,8400,256]: models/bubble_detector_v4s_head.tflite compiled for SM8850 like
       the above, fp16.
 
+  sm8850/sam_encoder_edgesam_v2.tflite
+      EdgeSAM image encoder (models/NOTICE, section 2): models/sam_encoder_edgesam_v2.tflite compiled for
+      SM8850 like the above, fp16.
+
 On other Snapdragon SoCs with a Hexagon NPU the plain models are compiled on the device the first
 time (cached afterwards in the app's cache directory).
 
